@@ -1,0 +1,20 @@
+# JML Python 侧依赖清单
+#
+# 重要：本文件是 JML 项目自己的依赖声明，与旧项目 D:\py_lj 完全无关。
+# 严禁引用旧项目的 .venv 或任何旧路径。
+#
+# 安装方式：
+#   python -m pip install -r requirements.txt
+#
+# 版本说明：下列版本号取自本机 D:\python (Python 3.13.7) 实测已安装的版本，
+# 未凭记忆填写。升级版本属于行为变更，需单独评估后修改。
+
+# 核心业务库：禁漫天堂 API（搜索/详情/下载/封面）
+# 其自身依赖 commonx、curl-cffi（HTTP 传输）、pycryptodome（图片解密）
+jmcomic==2.7.1
+
+# 图片解码与像素校验
+pillow==12.3.0
+
+# 配置文件读写
+PyYAML==6.0.3

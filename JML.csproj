@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>JML</RootNamespace>
+    <AssemblyName>JML</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Python 桥接（版本由 Directory.Packages.props 集中锁定） -->
+    <PackageReference Include="pythonnet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- PCL2 风格 UI 库（本机仓库，非 NuGet）
+         实测：net10.0-windows 项目可直接引用 net8.0-windows 库，无需改动该仓库 -->
+    <ProjectReference Include="..\PCLUI\PlainToolkit.UI-main\PlainToolkit.UI\PlainToolkit.UI.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 将 Python 后端代码随输出目录分发，便于运行时定位 -->
+    <None Include="Python\**\*.py" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- 排除测试项目目录：否则主项目会把测试的 .cs 也编译进去，
+       导致 Xunit 类型找不到、以及 AssemblyInfo 特性重复 -->
+  <ItemGroup>
+    <Compile Remove="JML.Tests\**" />
+    <None Remove="JML.Tests\**" />
+    <Page Remove="JML.Tests\**" />
+    <Resource Remove="JML.Tests\**" />
+    <EmbeddedResource Remove="JML.Tests\**" />
+  </ItemGroup>
+
+</Project>

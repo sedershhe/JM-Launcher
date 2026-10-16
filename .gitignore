@@ -1,0 +1,30 @@
+# 构建产物
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+
+# Visual Studio / Rider / VSCode
+.vs/
+.idea/
+.vscode/
+
+# NuGet
+*.nupkg
+
+# 运行时数据（配置/日志/缓存，不入库）
+runtime_data/
+logs/
+
+# 安全红线：凭据相关一律不入库
+*.credentials
+credentials.json
+secrets.json
+appsettings.local.json
+option.yml
+
+# Python
+__pycache__/
+*.pyc
+.venv/

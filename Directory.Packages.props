@@ -1,0 +1,18 @@
+<Project>
+  <!-- 集中包版本管理（CPM）：所有 NuGet 版本在此统一锁定，项目文件内不再写版本号。
+       这是旧项目最大的工程教训——依赖清单必须入库、可复现。 -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Python 桥接：官方最新稳定版，支持 Python 3.11 ~ 3.15 -->
+    <PackageVersion Include="pythonnet" Version="3.2.1" />
+
+    <!-- 单元测试 -->
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+  </ItemGroup>
+</Project>
