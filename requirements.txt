@@ -1,15 +1,23 @@
 # JML Python 侧依赖清单
 #
-# 重要：本文件是 JML 项目自己的依赖声明，与旧项目 D:\py_lj 完全无关。
-# 严禁引用旧项目的 .venv 或任何旧路径。
+# 重要：本文件是 JML 项目自己的依赖声明，与旧项目完全无关。
+# 严禁引用旧项目的虚拟环境或任何旧路径。
 #
-# 安装方式：
-#   python -m pip install -r requirements.txt
+# === 用户自行安装 Python 时的安装步骤 ===
 #
-# 版本说明：下列版本号取自本机 D:\python (Python 3.13.7) 实测已安装的版本，
-# 未凭记忆填写。升级版本属于行为变更，需单独评估后修改。
+# 1. 到 https://www.python.org/downloads/ 下载 Python 3.13（64 位）
+#    安装时务必勾选 "Add python.exe to PATH"
+#    （pythonnet 3.2.1 支持 3.11 ~ 3.15，推荐 3.13）
+#
+# 2. 安装依赖（在本文件所在目录打开命令行执行）：
+#       python -m pip install -r requirements.txt
+#
+# 3. 若 Python 装在非标准位置，可设置环境变量 JML_PYTHON_HOME 指向安装目录。
+#
+# 版本说明：下列版本号取自本机实测已安装的版本，未凭记忆填写。
+# 升级版本属于行为变更，需单独评估后修改。
 
-# 核心业务库：禁漫天堂 API（搜索/详情/下载/封面）
+# 核心业务库：禁漫天堂 API（搜索 / 详情 / 下载 / 封面）
 # 其自身依赖 commonx、curl-cffi（HTTP 传输）、pycryptodome（图片解密）
 jmcomic==2.7.1
 

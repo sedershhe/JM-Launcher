@@ -8,8 +8,8 @@ namespace JML.Infrastructure;
 /// Python 运行时（pythonnet）的初始化与生命周期管理。
 ///
 /// 设计约束：
-/// 1. 严禁硬编码 Python 安装路径（不写 D:\python，也不写任何旧项目路径），
-///    否则换机器即失效——这正是旧项目的已知缺陷，不得重演。
+/// 1. 严禁硬编码 Python 安装路径（本项目由用户自行安装 Python，路径因人而异），
+///    只能靠探测定位——硬编码会导致换机器即失效，这是旧项目的已知缺陷，不得重演。
 /// 2. Python 引擎整个进程只初始化一次，必须幂等。
 /// 3. 多线程调用（WPF 后台线程调 Python）必须 BeginAllowThreads。
 /// 4. 所有 Python 调用必须持有 GIL。
@@ -221,5 +221,101 @@ public static class PythonRuntime
         {
             action();
         }
+    }
+
+    /// <summary>
+    /// 检测本机 Python 环境是否满足运行要求。
+    ///
+    /// 由于 Python 由用户自行安装，本方法是启动阶段的第一道关卡：
+    /// 不做任何猜测，逐项实测，把"缺什么、怎么装"明确告诉用户。
+    ///
+    /// 本方法不写入日志时输出任何凭据；检测结果本身不含敏感信息。
+    /// </summary>
+    public static PythonEnvironmentReport Inspect()
+    {
+        var report = new PythonEnvironmentReport();
+
+        // 第 1 步：能否定位 Python 运行时
+        string? dll = LocatePythonDll();
+        report.PythonDllPath = dll;
+
+        if (dll is null)
+        {
+            report.IsReady = false;
+            report.Problems.Add("未检测到 Python 运行时（需要 64 位 Python 3.11 ~ 3.15）。");
+            report.Instructions.Add("请到 python.org 下载并安装 Python 3.13（64 位），安装时勾选 \"Add python.exe to PATH\"。");
+            report.Instructions.Add("若已安装但装在非标准位置，可设置环境变量 JML_PYTHON_HOME 指向 Python 安装目录。");
+            return report;
+        }
+
+        // 第 2 步：Python 版本是否合规
+        try
+        {
+            Initialize();
+            report.PythonVersion = Invoke(() =>
+            {
+                dynamic sys = Py.Import("sys");
+                return (string)sys.version.split()[0];
+            });
+        }
+        catch (Exception ex)
+        {
+            report.IsReady = false;
+            report.Problems.Add($"Python 初始化失败：{SanitizeBrief(ex)}");
+            report.Instructions.Add("请确认安装的是 64 位 Python，且与本程序架构一致。");
+            return report;
+        }
+
+        // 第 3 步：依赖库是否齐全
+        // 对照 requirements.txt 中的声明逐项实测
+        string[] required = { "jmcomic", "PIL", "yaml", "curl_cffi", "Crypto" };
+
+        foreach (string package in required)
+        {
+            try
+            {
+                string? version = Invoke(() =>
+                {
+                    dynamic module = Py.Import(package);
+                    object? v = module.__version__;
+                    return v is null ? null : v.ToString();
+                });
+
+                if (version is null)
+                {
+                    report.AvailablePackages[package] = "已安装";
+                }
+                else
+                {
+                    report.AvailablePackages[package] = version;
+                }
+            }
+            catch
+            {
+                report.MissingPackages.Add(package);
+            }
+        }
+
+        if (report.MissingPackages.Count > 0)
+        {
+            report.IsReady = false;
+            report.Problems.Add("Python 依赖库未安装完整。");
+            report.Instructions.Add("请在命令行执行：python -m pip install -r requirements.txt");
+            report.Instructions.Add("（requirements.txt 位于本程序目录下）");
+        }
+        else
+        {
+            report.IsReady = true;
+        }
+
+        return report;
+    }
+
+    /// <summary>
+    /// 生成简短的异常描述，且经过脱敏，避免把凭据带进界面或日志。
+    /// </summary>
+    private static string SanitizeBrief(Exception ex)
+    {
+        return LogSanitizer.Sanitize($"{ex.GetType().Name}: {ex.Message}");
     }
 }
