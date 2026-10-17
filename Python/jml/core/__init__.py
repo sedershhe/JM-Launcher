@@ -1,4 +1,9 @@
-"""core 包：协议常量与异常定义。"""
+"""core 包：协议常量、异常与阶段 2 业务核心。
+
+业务模块：book_ids（编号解析）/ naming（产物命名）/ archive（打包校验）/
+downloader（批量下载）/ searcher（搜索）/ detail（详情）/ cover（封面字节）/
+errors（错误分类与脱敏）/ jm_source（jmcomic 数据源适配）。
+"""
 
 from jml.core.protocol import (
     API_VERSION,

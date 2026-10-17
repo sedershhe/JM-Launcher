@@ -1,7 +1,7 @@
 """PluginContext——传给插件 setup 的唯一对象（对应旧缺陷 #9）。
 
 - 插件只能通过本对象与宿主交互：register_service / subscribe /
-  get_service / config_get / log，**只暴露这些方法**
+  get_service / call_service / config_get / log，**只暴露这些方法**
 - 插件不许摸宿主私有属性：本类不持有 registry/bus 的引用，全部通过
   注册回调闭包转发（插件在 ctx 上拿不到任何宿主内部对象）
 - ctx 内保存 plugin_id，log 打日志时自动带前缀 [plugin:xxx]
@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 from typing import Callable
+
+from jml.core.protocol import ServiceError
 
 
 class PluginContext:
@@ -44,7 +46,7 @@ class PluginContext:
         """本插件的 id（manifest 中声明）。"""
         return self.__plugin_id
 
-    # -- 插件可调用的方法（仅此五个） ---------------------------------------
+    # -- 插件可调用的方法（仅此六个） ---------------------------------------
 
     def register_service(self, name: str, version: int, ref: object) -> None:
         """注册本插件提供的服务（转发给宿主服务注册表）。
@@ -60,6 +62,38 @@ class PluginContext:
     def get_service(self, name: str, version: int) -> object:
         """获取其它插件或主程序注册的服务（精确匹配版本）。"""
         return self.__on_get_service(name, version)
+
+    def call_service(
+        self, name: str, version: int, method: str, payload: dict
+    ) -> dict:
+        """调用其它服务的方法（插件唯一跨服务调用路径，对应技术方案 2.2）。
+
+        等价于 ``ctx.get_service(name, version).call(method, payload)``，
+        但把"取服务 + 校验 call 方法"收口在宿主，插件无需接触注册表。
+
+        异常:
+            ServiceError —— 服务不存在 / 服务对象没有 ``call`` 方法
+        """
+        try:
+            provider = self.__on_get_service(name, version)
+        except ServiceError:
+            raise
+        except Exception as exc:  # 统一收口成协议错误，不让插件看到宿主内部异常
+            raise ServiceError(
+                f"获取服务 {name}/版本 {version} 失败: {type(exc).__name__}: {exc}"
+            ) from exc
+        call = getattr(provider, "call", None)
+        if not callable(call):
+            raise ServiceError(
+                f"服务 {name}/版本 {version} 的提供者不支持 call 方法"
+            )
+        # 由宿主注入调用方标识，供 jm.search 等服务按调用方隔离会话；
+        # 不允许插件伪造（_caller 始终由宿主覆盖），且不改写调用方原字典。
+        call_payload = payload
+        if isinstance(payload, dict):
+            call_payload = dict(payload)
+            call_payload["_caller"] = f"plugin:{self.__plugin_id}"
+        return call(method, call_payload)
 
     def config_get(self, key: str) -> object:
         """读本插件的配置项（无值时返回 schema 默认值）。"""

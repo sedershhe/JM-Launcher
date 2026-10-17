@@ -190,6 +190,23 @@ def test_discover_records_bad_manifest_and_continues(make_plugin, tmp_path):
     assert any("bad_one" in err for err in loader._LOAD_ERRORS)
 
 
+def test_recent_errors_returns_read_only_snapshot(make_plugin, tmp_path):
+    """recent_errors() 是只读快照：调用方改副本不影响 loader 内部状态。"""
+    root = tmp_path / "plugins"
+    root.mkdir()
+    bad = root / "bad_one"
+    bad.mkdir()
+    (bad / "plugin.json").write_text("{ broken", encoding="utf-8")
+
+    loader.discover(str(root))
+    snapshot = loader.recent_errors()
+
+    assert len(snapshot) == 1
+    assert "bad_one" in snapshot[0]
+    snapshot.clear()
+    assert len(loader.recent_errors()) == 1
+
+
 def test_discover_missing_dir_raises(tmp_path):
     """discover：插件目录本身不存在 → 抛 PluginError（传错路径属硬错误）。"""
     with pytest.raises(PluginError):

@@ -21,11 +21,14 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import uuid
 
 import pytest
@@ -104,17 +107,24 @@ def isolated_appdata(monkeypatch, tmp_path):
 def reset_host_state():
     """每个用例前后重置单例状态，避免用例互相污染。
 
-    loader 模块在 import 时把 ``events.BUS`` 绑定到自身命名空间，
-    而 ``events.reset()`` 会换一个新总线对象，所以这里显式把 loader.BUS
-    重新指向最新总线，保证 loader 内订阅的 handler 也一并被清掉。
+    事件总线已下沉到 ``jml.events``，loader 通过 ``events.BUS`` 动态访问；
+    ``events.reset()`` 换新单例后 loader 自动跟随，无需再手工回填 BUS。
+    诊断环表与落盘目录也在这里重置。
     """
-    from jml.host import events, loader, registry
+    from jml import events
+    from jml.core import diagnostics, downloader, jm_source, searcher
+    from jml.host import loader, registry
 
     def _reset_all() -> None:
         registry.reset()
         events.reset()
         loader.reset()
-        loader.BUS = events.BUS
+        diagnostics.set_log_dir(None)
+        diagnostics.clear()
+        # 阶段 2：共享搜索会话、数据源单例与下载批次登记也要隔离
+        searcher.reset_shared_session()
+        jm_source.reset_source()
+        downloader.reset()
 
     saved_path = list(sys.path)
     saved_modules = set(sys.modules)
@@ -180,3 +190,181 @@ def make_plugin(tmp_path):
         return plugin_dir
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# 共享假数据源（搜索/详情/封面/下载测试共用，避免每个文件各写一份）
+# ---------------------------------------------------------------------------
+
+
+def _fake_png_bytes() -> bytes:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 3), (10, 120, 200)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+FAKE_PNG = _fake_png_bytes()
+
+
+class FakeSource:
+    """可配置假数据源，覆盖 ``jm_source`` 协议的四个方法。
+
+    下载相关参数：``books`` / ``chapters`` / ``images_per_chapter`` /
+    ``fail_books`` / ``invalid_image_books`` / ``sleep`` / ``gate`` /
+    ``tracker``（需有 ``enter()``/``exit()``）。
+    搜索/详情/封面参数：``search_results`` / ``total_pages`` / ``album`` /
+    ``album_error`` / ``cover_data`` / ``cover_error`` / ``search_error``。
+    """
+
+    def __init__(
+        self,
+        books: dict[str, str] | None = None,
+        *,
+        chapters: int = 1,
+        images_per_chapter: int = 2,
+        fail_books: set[str] | None = None,
+        invalid_image_books: set[str] | None = None,
+        sleep: float = 0.0,
+        gate: threading.Event | None = None,
+        tracker=None,
+        search_results: list[dict] | None = None,
+        total_pages: int = 3,
+        album: dict | None = None,
+        album_error: BaseException | None = None,
+        cover_data: bytes | None = b"COVER-BYTES",
+        cover_error: BaseException | None = None,
+        search_error: BaseException | None = None,
+        record_dest_dirs: bool = False,
+    ) -> None:
+        self.books = dict(books or {})
+        self.chapters = chapters
+        self.images_per_chapter = images_per_chapter
+        self.fail_books = fail_books or set()
+        self.invalid_image_books = invalid_image_books or set()
+        self.sleep = sleep
+        self.gate = gate
+        self.tracker = tracker
+        self.search_results = (
+            list(search_results)
+            if search_results is not None
+            else [self.default_search_result()]
+        )
+        self.total_pages = total_pages
+        self.album = dict(album) if album is not None else None
+        self.album_error = album_error
+        self.cover_data = cover_data
+        self.cover_error = cover_error
+        self.search_error = search_error
+        self.record_dest_dirs = record_dest_dirs
+
+        self.search_calls: list[tuple[str, int]] = []
+        self.album_calls: list[str] = []
+        self.cover_calls: list[str] = []
+        self.dest_dirs: list[str] = []
+        self.downloaded = 0
+        self.chapters_started = 0
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def default_search_result(book_id: str = "1") -> dict:
+        return {
+            "book_id": book_id,
+            "title": f"标题{book_id}",
+            "author": "作者",
+            "page_count": 12,
+            "tags": ["标签"],
+            "cover_url": f"https://example.invalid/{book_id}.jpg",
+        }
+
+    @staticmethod
+    def detail_album(book_id: str = "1") -> dict:
+        return {
+            "book_id": book_id,
+            "title": "详情标题",
+            "author": "作者甲",
+            "page_count": 2,
+            "tags": ["标签"],
+            "description": "简" * 250,
+            "cover_url": "https://example.invalid/1.jpg",
+            "chapters": [{"photo_id": "11", "index": 1, "title": "第1章"}],
+        }
+
+    # -- jm_source 协议 -----------------------------------------------------
+
+    def search(self, keyword: str, page: int) -> dict:
+        self.search_calls.append((keyword, page))
+        if self.search_error is not None:
+            raise self.search_error
+        return {
+            "keyword": keyword,
+            "page": page,
+            "total_pages": self.total_pages,
+            "results": list(self.search_results),
+        }
+
+    def get_album(self, book_id: str) -> dict:
+        self.album_calls.append(book_id)
+        if self.album_error is not None:
+            raise self.album_error
+        if book_id in self.fail_books:
+            raise RuntimeError(f"假下载源拒绝 {book_id}")
+        if self.album is not None:
+            data = dict(self.album)
+            data.setdefault("book_id", book_id)
+            return data
+
+        chapters = [
+            {"photo_id": f"{book_id}-{index}", "index": index, "title": f"第{index}章"}
+            for index in range(1, self.chapters + 1)
+        ]
+        return {
+            "book_id": book_id,
+            "title": self.books.get(book_id, "详情标题"),
+            "author": "作者甲",
+            "page_count": self.chapters * self.images_per_chapter,
+            "tags": ["标签"],
+            "description": "简" * 250,
+            "cover_url": "https://example.invalid/1.jpg",
+            "chapters": chapters,
+        }
+
+    def iter_chapter_images(self, book_id: str, chapter: dict, dest_dir: str):
+        if self.tracker is not None:
+            self.tracker.enter()
+        try:
+            with self.lock:
+                self.chapters_started += 1
+            if self.record_dest_dirs:
+                self.dest_dirs.append(dest_dir)
+            os.makedirs(dest_dir, exist_ok=True)
+            for index in range(1, self.images_per_chapter + 1):
+                if self.gate is not None:
+                    self.gate.wait(timeout=5)
+                if self.sleep:
+                    time.sleep(self.sleep)
+                path = os.path.join(
+                    dest_dir, f"{book_id}_{chapter['index']}_{index}.png"
+                )
+                data = b"not-an-image" if book_id in self.invalid_image_books else FAKE_PNG
+                with open(path, "wb") as handle:
+                    handle.write(data)
+                with self.lock:
+                    self.downloaded += 1
+                yield path
+        finally:
+            if self.tracker is not None:
+                self.tracker.exit()
+
+    def cover_bytes(self, book_id: str) -> bytes | None:
+        self.cover_calls.append(book_id)
+        if self.cover_error is not None:
+            raise self.cover_error
+        return self.cover_data
+
+
+@pytest.fixture
+def fake_source_cls():
+    """返回共享 FakeSource 类（各测试按需实例化不同配置）。"""
+    return FakeSource

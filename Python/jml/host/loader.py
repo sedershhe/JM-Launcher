@@ -30,7 +30,7 @@ from jml.core.protocol import (
     DependencyError,
     PluginError,
 )
-from jml.host.events import BUS
+from jml import events
 from jml.host.manifest import load_manifest
 from jml.host.plugin_context import PluginContext
 from jml.host.registry import REGISTRY
@@ -214,7 +214,7 @@ def _build_context(manifest: dict) -> PluginContext:
         REGISTRY.register_service(name, version, ref)
 
     def on_subscribe(event_type: str, handler) -> None:
-        BUS.subscribe(event_type, handler)
+        events.BUS.subscribe(event_type, handler)
 
     def on_get_service(name: str, version: int) -> object:
         return REGISTRY.resolve(name, version)
@@ -244,6 +244,16 @@ def _build_context(manifest: dict) -> PluginContext:
 #: discover 阶段的坏 manifest 错误（"目录名: 消息" 列表）
 _LOAD_ERRORS: list[str] = []
 _LOAD_ERRORS_LOCK = threading.RLock()
+
+
+def recent_errors() -> list[str]:
+    """返回最近一次扫描/装配过程中记录的坏 manifest 错误快照。
+
+    只读快照（副本），调用方（如 jml_backend.list_plugins）不需要也不允许
+    直接访问模块私有状态。元素格式固定为 ``"目录名: 错误消息"``。
+    """
+    with _LOAD_ERRORS_LOCK:
+        return list(_LOAD_ERRORS)
 
 #: sys.path 操作锁（load_all 并发调用时保护路径装配）
 _SYS_PATH_LOCK = threading.RLock()
