@@ -6,7 +6,7 @@
 - 文风要求：直白易懂；解释复杂概念时先分环节步骤说明，最后再用一段话总结简述
 
 ##  项目概览
-- 本项目直接继承自"D:\py_lj"项目的jm4.0插件化版本以及已经开发的几个主要插件,目标是基于C#/NET栈和本地"D:\vscode\Project\PCLUI\PlainToolkit.UI-main"UI仓库,把原有的GUI界面重做为PCL2的界面风格,后端逻辑完全不变,保留python原有逻辑,使用pythonnet做前后端桥接,C#层不做任何功能业务逻辑.
+- 本项目直接继承自"D:\py_lj"项目的jm4.0插件化版本以及已经开发的几个主要插件,目标是基于C#/NET栈和本地"D:\vscode\Project\PCLUI\PlainToolkit.UI-main"UI素材仓库,"D:\vscode\Project\PCLUI\PCL-main"仓库,把原有的GUI界面重做为PCL2的界面风格,后端逻辑完全不变,保留python原有逻辑,使用pythonnet做前后端桥接,C#层不做任何功能业务逻辑.
 
 ##  文件管理规则
 - **文件命名**：生成文件时，命名要包含**时间 + 主题 + 版本**（例如 20260731_漫画下载器_v1.0.py）
