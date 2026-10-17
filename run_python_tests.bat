@@ -12,7 +12,7 @@ REM 本脚本把它加入 PYTHONPATH，不改动系统 Python，也不需要联�
 
 setlocal
 
-set "REPO_ROOT=D:\vscode\Project\JML"
+set "REPO_ROOT=%~dp0"
 set "PYTEST_ENV=%REPO_ROOT%\_pytest_env"
 set "PY_SRC=%REPO_ROOT%\Python"
 
