@@ -1,0 +1,81 @@
+<!--
+    PCL2 风格卡片（2026-10-17，页面层重构）
+    参数唯一来源：docs/20261017_PCL2界面视觉规格_v1.0.md C 节 / E 节，逐项对应 PCL2 源码：
+      外观（MyCard.vb:66-70）：无边框、底色 #F5FFFFFF（alpha 245 白）、圆角 5；
+      阴影（MyCard.vb:66-68、175-176）：紧阴影 Margin -3,-3,-3,-4、ShadowRadius 3、
+                颜色 ColorObject1 #343D4A、常态不透明度 0.07（不用 blur10 的发虚阴影）；
+      标题（MyCard.vb:81-83）：Margin=15,12,0,0、FontSize=13、Bold、色 ColorBrush1；
+      标题行高 40（MyCard.vb:325 / PageDownloadInstall.xaml:31 内容从 40 开始）；
+      内容默认内边距 20,40,18,15（PageDownloadInstall.xaml:31），由 JmlCard.cs
+                重写 Padding 默认值提供，使用方可按页面覆盖（搜索卡 25,40,25,15 等）。
+    主题色一律引用主题资源键；#F5FFFFFF 是 PCL2 MyCard.vb:70 的原值，按任务约定只在此处写一次。
+
+    为什么是 ContentControl + ResourceDictionary 而不是 UserControl 自带 XAML：
+    UserControl 的 XAML 会建立独立名称作用域，页面里写在卡片内的 x:Name 控件会在编译期报
+    MC3093（名称注册在另一范围）。卡片只是“外观 + Header + Content”，用 ContentControl
+    子类 + 隐式样式模板即可，内容仍属于页面名称作用域，x:Name 不受影响。
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:ctl="clr-namespace:JML.Controls">
+
+    <!-- PCL2 卡片白：#F5FFFFFF（MyCard.vb:70 原值，alpha 245）。按任务约定全仓只写这一次。 -->
+    <SolidColorBrush x:Key="JmlCardBackground" Color="#F5FFFFFF" />
+
+    <Style TargetType="{x:Type ctl:JmlCard}">
+        <Setter Property="OverridesDefaultStyle" Value="True" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="SnapsToDevicePixels" Value="False" />
+        <Setter Property="UseLayoutRounding" Value="False" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="VerticalContentAlignment" Value="Stretch" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ctl:JmlCard}">
+                    <Grid>
+                        <!-- 阴影层：向外扩 3（PCL2 MyCard.vb:66 Margin=-3,-3,-3,-4）。 -->
+                        <Border x:Name="CardShadow"
+                                Margin="-3,-3,-3,-4"
+                                CornerRadius="5"
+                                Background="{StaticResource JmlCardBackground}">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="3"
+                                                  ShadowDepth="0"
+                                                  Opacity="0.07"
+                                                  Color="{DynamicResource ColorObject1}" />
+                            </Border.Effect>
+                        </Border>
+
+                        <!-- 白底层：无边框、圆角 5、#F5FFFFFF。 -->
+                        <Border x:Name="CardSurface"
+                                Background="{StaticResource JmlCardBackground}"
+                                CornerRadius="5"
+                                IsHitTestVisible="False" />
+
+                        <!-- 标题（40 高标题行由内容的 Padding.Top=40 让开） + 内容。 -->
+                        <Grid>
+                            <TextBlock x:Name="HeaderText"
+                                       Text="{TemplateBinding Header}"
+                                       Margin="15,12,0,0"
+                                       FontSize="13"
+                                       FontWeight="Bold"
+                                       Foreground="{DynamicResource ColorBrush1}"
+                                       HorizontalAlignment="Left"
+                                       VerticalAlignment="Top"
+                                       IsHitTestVisible="False"
+                                       TextTrimming="CharacterEllipsis" />
+                            <ContentPresenter x:Name="CardContent"
+                                              Content="{TemplateBinding Content}"
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                                              ContentStringFormat="{TemplateBinding ContentStringFormat}"
+                                              Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Grid>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+</ResourceDictionary>

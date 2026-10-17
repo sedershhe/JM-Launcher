@@ -2,9 +2,11 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using JML.Bridge.Dto;
+using JML.Controls;
 using JML.Pages;
 using Xunit;
 using Xunit.Sdk;
@@ -644,6 +646,248 @@ public class UiSmokeTests
                 GetStyleSetter<Thickness>(style, FrameworkElement.MarginProperty));
         });
     }
-}
 
+    // ------------------------------------------------------------------
+    // 页面层 PCL2 参数回归（2026-10-17）
+    // 断言的是计划书/规格里的硬参数，不绑定具体页面文案或业务行为。
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// 卡片（PCL2 MyCard）：圆角 5、底色 #F5FFFFFF、无边框、紧阴影
+    /// （BlurRadius=3 / ShadowDepth=0 / Opacity=0.07 / Color=ColorObject1）、
+    /// 标题 Margin=15,12、13px Bold ColorBrush1、内容默认内边距 20,40,18,15。
+    /// </summary>
+    [Fact]
+    public void JmlCard_Template_UsesPclParameters()
+    {
+        RunOnUiThread(() =>
+        {
+            var card = new JmlCard
+            {
+                Header = "测试卡片",
+                Content = new TextBlock { Text = "内容" },
+            };
+            card.Style = (Style)Application.Current.FindResource(typeof(JmlCard));
+
+            card.Measure(new Size(320, 200));
+            card.Arrange(new Rect(0, 0, 320, 200));
+            card.UpdateLayout();
+
+            // 默认内容内边距（PCL2 PageDownloadInstall.xaml:31）
+            Assert.Equal(new Thickness(20, 40, 18, 15), card.Padding);
+
+            // 白底层：无边框、圆角 5、#F5FFFFFF
+            var surface = Assert.IsType<Border>(card.Template.FindName("CardSurface", card));
+            Assert.Equal(0, surface.BorderThickness.Left);
+            Assert.Equal(5, surface.CornerRadius.TopLeft);
+            var surfaceBrush = Assert.IsType<SolidColorBrush>(surface.Background);
+            Assert.Equal(Color.FromArgb(0xF5, 0xFF, 0xFF, 0xFF), surfaceBrush.Color);
+
+            // 阴影层：向外扩 3、紧阴影参数（PCL2 MyCard.vb:66-68）
+            var shadow = Assert.IsType<Border>(card.Template.FindName("CardShadow", card));
+            Assert.Equal(new Thickness(-3, -3, -3, -4), shadow.Margin);
+            Assert.Equal(5, shadow.CornerRadius.TopLeft);
+            var effect = Assert.IsType<DropShadowEffect>(shadow.Effect);
+            Assert.Equal(3, effect.BlurRadius);
+            Assert.Equal(0, effect.ShadowDepth);
+            Assert.Equal(0.07, effect.Opacity, 3);
+            Assert.Equal((Color)Application.Current.FindResource("ColorObject1"), effect.Color);
+
+            // 标题：Margin=15,12、13px Bold、ColorBrush1
+            var header = Assert.IsType<TextBlock>(card.Template.FindName("HeaderText", card));
+            Assert.Equal("测试卡片", header.Text);
+            Assert.Equal(new Thickness(15, 12, 0, 0), header.Margin);
+            Assert.Equal(13, header.FontSize);
+            Assert.Equal(FontWeights.Bold, header.FontWeight);
+            var headerBrush = Assert.IsType<SolidColorBrush>(header.Foreground);
+            Assert.Equal(ResourceColor("ColorBrush1"), headerBrush.Color);
+
+            // 内容从 Padding 开始（上 40 让开标题行）
+            var content = Assert.IsType<ContentPresenter>(card.Template.FindName("CardContent", card));
+            Assert.Equal(card.Padding, content.Margin);
+        });
+    }
+
+    /// <summary>
+    /// 主行动按钮（PCL2 MyExtraTextButton）：高 52、圆角 20.8、底 ColorBrush3、
+    /// 字 ColorBrush8 16px、DropShadowEffect BlurRadius=10 ShadowDepth=0 Opacity=0.2、
+    /// 禁用底 ColorBrushGray4。
+    /// </summary>
+    [Fact]
+    public void PrimaryButton_Template_IsPclCapsule()
+    {
+        RunOnUiThread(() =>
+        {
+            var button = new Button
+            {
+                Style = (Style)Application.Current.FindResource("PrimaryButton"),
+                Content = "开始下载",
+            };
+
+            button.Measure(new Size(300, 52));
+            button.Arrange(new Rect(0, 0, 300, 52));
+            button.UpdateLayout();
+
+            Assert.Equal(52, button.ActualHeight);
+            Assert.Equal(16, button.FontSize);
+            var foreground = Assert.IsType<SolidColorBrush>(button.Foreground);
+            Assert.Equal(ResourceColor("ColorBrush8"), foreground.Color);
+
+            var root = Assert.IsType<Border>(button.Template.FindName("Root", button));
+            Assert.Equal(20.8, root.CornerRadius.TopLeft, 3);
+            Assert.Equal(ResourceColor("ColorBrush3"), Assert.IsType<SolidColorBrush>(root.Background).Color);
+
+            var effect = Assert.IsType<DropShadowEffect>(root.Effect);
+            Assert.Equal(10, effect.BlurRadius);
+            Assert.Equal(0, effect.ShadowDepth);
+            Assert.Equal(0.2, effect.Opacity, 3);
+
+            button.IsEnabled = false;
+            button.UpdateLayout();
+            Assert.Equal(
+                ResourceColor("ColorBrushGray4"),
+                Assert.IsType<SolidColorBrush>(root.Background).Color);
+        });
+    }
+
+    /// <summary>
+    /// 次按钮（PCL2 MyButton）：高 35、圆角 3、底 #55FFFFFF、边框 1px ColorBrush1、文字 13px。
+    /// </summary>
+    [Fact]
+    public void SecondaryButton_Style_IsPcl35()
+    {
+        RunOnUiThread(() =>
+        {
+            var button = new Button
+            {
+                Style = (Style)Application.Current.FindResource("SecondaryButton"),
+                Content = "浏览…",
+            };
+
+            button.Measure(new Size(200, 35));
+            button.Arrange(new Rect(0, 0, 200, 35));
+            button.UpdateLayout();
+
+            Assert.Equal(35, button.ActualHeight);
+            Assert.Equal(13, button.FontSize);
+            Assert.Equal(
+                Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF),
+                Assert.IsType<SolidColorBrush>(button.Background).Color);
+            Assert.Equal(
+                ResourceColor("ColorBrush1"),
+                Assert.IsType<SolidColorBrush>(button.BorderBrush).Color);
+
+            var panFore = Assert.IsType<Border>(button.Template.FindName("PanFore", button));
+            Assert.Equal(3, panFore.CornerRadius.TopLeft);
+            Assert.Equal(1, panFore.BorderThickness.Left);
+        });
+    }
+
+    /// <summary>
+    /// 页面外边距与卡片间距（PCL2）：下载页 25,10,25,25、卡片竖向间距 12；
+    /// 搜索页 25、搜索卡→结果卡 15、分页卡上距 15；详情窗内边距 25。
+    /// </summary>
+    [Fact]
+    public void Pages_ContentMargins_ArePcl25()
+    {
+        RunOnUiThread(() =>
+        {
+            var download = new DownloadPage();
+            var downloadRoot = Assert.IsType<Grid>(download.Content);
+            Assert.Equal(new Thickness(25, 10, 25, 25), downloadRoot.Margin);
+            Assert.Equal(new Thickness(20, 40, 18, 15), Find<JmlCard>(download, "CardInput").Padding);
+            Assert.Equal(new Thickness(0, 12, 0, 0), Find<JmlCard>(download, "CardLog").Margin);
+
+            var search = new SearchPage();
+            Assert.Equal(new Thickness(25), Assert.IsType<Grid>(search.Content).Margin);
+            var searchCard = Find<JmlCard>(search, "CardSearch");
+            Assert.Equal(new Thickness(0, 0, 0, 15), searchCard.Margin);
+            Assert.Equal(new Thickness(25, 40, 25, 15), searchCard.Padding);
+            Assert.Equal(new Thickness(0, 15, 0, 0), Find<JmlCard>(search, "CardPages").Margin);
+
+            var detail = new DetailWindow("123456");
+            try
+            {
+                Assert.Equal(new Thickness(25), Assert.IsType<Grid>(detail.Content).Margin);
+                Assert.Equal(19, Find<TextBlock>(detail, "TextTitle").FontSize);
+                Assert.Equal(13, Find<TextBlock>(detail, "TextDescription").FontSize);
+                Assert.Same(
+                    Application.Current.FindResource("PrimaryButton"),
+                    Find<Button>(detail, "BtnDownload").Style);
+
+                Layout((FrameworkElement)detail.Content);
+                Assert.Equal(52, Find<Button>(detail, "BtnDownload").ActualHeight);
+            }
+            finally
+            {
+                detail.Close();
+            }
+        });
+    }
+
+    /// <summary>
+    /// 设置页布局不拉伸修复：外层 ScrollViewer 必须禁用横向滚动（否则 * 列塌成 6px），
+    /// 下载目录输入框在 1080 宽布局下必须铺满（实测修复前只有 6×36）。
+    /// </summary>
+    [Fact]
+    public void SettingsPage_Content_Stretches()
+    {
+        RunOnUiThread(() =>
+        {
+            var settings = new SettingsPage();
+            Layout(settings);
+
+            var scroll = Assert.IsType<ScrollViewer>(settings.Content);
+            Assert.Equal(ScrollBarVisibility.Disabled, scroll.HorizontalScrollBarVisibility);
+
+            var input = Find<TextBox>(settings, "InputDownloadDir");
+            Assert.True(
+                input.ActualWidth > 400,
+                $"设置页 InputDownloadDir 实测 {input.ActualWidth:0.#}×{input.ActualHeight:0.#}；" +
+                "期望宽度 > 400（横向滚动禁用 + 卡片内容 Stretch 后铺满）。");
+            Assert.True(
+                input.ActualHeight >= 30,
+                $"设置页 InputDownloadDir 高度实测 {input.ActualHeight:0.#}；期望 ≥ 30（MinHeight=32）。");
+        });
+    }
+
+    /// <summary>
+    /// 插件页 PCL2 观感：左栏底 #F1FFFFFF、右侧 4 宽渐变阴影（黑 4%→透明）；
+    /// DataGrid 无粗边框、行高 36、表头高 34；操作按钮统一 35 高次按钮。
+    /// </summary>
+    [Fact]
+    public void PluginPage_UsesPclSidebarAndDataGrid()
+    {
+        RunOnUiThread(() =>
+        {
+            var hub = new PluginHubPage();
+
+            var left = Find<Border>(hub, "LeftColumn");
+            Assert.Equal(
+                Color.FromArgb(0xF1, 0xFF, 0xFF, 0xFF),
+                Assert.IsType<SolidColorBrush>(left.Background).Color);
+
+            var shadow = Find<Rectangle>(hub, "LeftShadow");
+            Assert.Equal(4, shadow.Width);
+            var gradient = Assert.IsType<LinearGradientBrush>(shadow.Fill);
+            Assert.Equal(0.04, gradient.Opacity, 3);
+            Assert.Equal(Colors.Black, gradient.GradientStops[0].Color);
+            Assert.Equal(0, gradient.GradientStops[1].Color.A);
+
+            var list = new PluginListView();
+            var grid = Find<DataGrid>(list, "GridPlugins");
+            Assert.Same(Application.Current.FindResource("JmlDataGrid"), grid.Style);
+            Assert.Equal(0, grid.BorderThickness.Left);
+            Assert.Equal(36, grid.RowHeight);
+            Assert.Equal(34, grid.ColumnHeaderHeight);
+
+            foreach (string name in new[] { "BtnEnable", "BtnDisable", "BtnRescan" })
+            {
+                Assert.Same(
+                    Application.Current.FindResource("SecondaryButton"),
+                    Find<Button>(list, name).Style);
+            }
+        });
+    }
+}
 

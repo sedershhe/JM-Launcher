@@ -9,6 +9,11 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <ResourceDictionary.MergedDictionaries>
+        <!-- PCL2 风格卡片：隐式样式 TargetType=JML.Controls.JmlCard（Controls\JmlCard.xaml） -->
+        <ResourceDictionary Source="pack://application:,,,/JML;component/Controls/JmlCard.xaml" />
+    </ResourceDictionary.MergedDictionaries>
+
     <!-- ========== 窗体内容底色 ==========
          PCL2 默认 UiBackgroundColorful=True，运行时用 HSL(hue±15, sat×0.8, 91) 三停靠斜向渐变
          （ModSecret.vb:122-130）。其 HSL 是带按色相亮度校正的自研实现，无法用静态色值精确复算；
@@ -17,6 +22,15 @@
         <GradientStop Offset="0" Color="{DynamicResource ColorObject8}" />
         <GradientStop Offset="0.45" Color="{DynamicResource ColorObject7}" />
         <GradientStop Offset="1" Color="{DynamicResource ColorObject8}" />
+    </LinearGradientBrush>
+
+    <!-- ========== 插件页左栏（PCL2 FormMain.xaml:144-152 / Application.xaml:66） ==========
+         左栏底色 #F1FFFFFF（alpha 241 白）；左右分界不用 1px 边框，而是左栏右侧 4 宽的
+         横向渐变阴影（黑 4% → 透明）。#F1FFFFFF 是 PCL2 原值，按任务约定只写这里一次并注释来源。 -->
+    <SolidColorBrush x:Key="JmlSidebarBackground" Color="#F1FFFFFF" />
+    <LinearGradientBrush x:Key="JmlSidebarShadow" StartPoint="0,0" EndPoint="1,0" Opacity="0.04">
+        <GradientStop Color="#000000" Offset="0" />
+        <GradientStop Color="#00000000" Offset="1" />
     </LinearGradientBrush>
 
     <!-- ========== 可输入文本框（基线主题的 PlainTextBox 空态几乎不可见） ==========
@@ -177,6 +191,93 @@
         <Setter Property="Opacity" Value="0.6" />
         <Setter Property="Margin" Value="13,20,5,4" />
         <Setter Property="Foreground" Value="{DynamicResource ColorBrush1}" />
+    </Style>
+
+    <!-- ========== 主行动按钮（PCL2 MyExtraTextButton 52 高胶囊） ==========
+         MyExtraTextButton.xaml:7        Height=52、Margin=20（由使用方设置）
+         MyExtraTextButton.xaml:12-22    CornerRadius=ActualHeight×0.4（52×0.4=20.8）、
+                                         底 ColorBrush3、字 ColorBrush8 16px、
+                                         DropShadowEffect ShadowDepth=0 BlurRadius=10 Opacity=0.2
+         MyExtraTextButton.xaml.vb:150-154 悬停 ColorBrush4、禁用 ColorBrushGray4
+         使用：下载页「开始下载」、搜索页「搜索」、详情窗「下载本子」。 -->
+    <Style x:Key="PrimaryButton" TargetType="Button">
+        <Setter Property="OverridesDefaultStyle" Value="True" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="SnapsToDevicePixels" Value="False" />
+        <Setter Property="UseLayoutRounding" Value="False" />
+        <Setter Property="Height" Value="52" />
+        <Setter Property="MinWidth" Value="140" />
+        <Setter Property="Padding" Value="20,0" />
+        <Setter Property="FontSize" Value="16" />
+        <Setter Property="Foreground" Value="{DynamicResource ColorBrush8}" />
+        <Setter Property="Background" Value="{DynamicResource ColorBrush3}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="20.8"
+                            Padding="{TemplateBinding Padding}"
+                            SnapsToDevicePixels="False"
+                            UseLayoutRounding="False">
+                        <Border.Effect>
+                            <!-- PCL2 MyExtraTextButton.xaml:20-22 只设 ShadowDepth/BlurRadius/Opacity，
+                                 颜色取 DropShadowEffect 默认黑。 -->
+                            <DropShadowEffect ShadowDepth="0"
+                                              BlurRadius="10"
+                                              Opacity="0.2" />
+                        </Border.Effect>
+                        <ContentPresenter HorizontalAlignment="Center"
+                                          VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background"
+                                    Value="{DynamicResource ColorBrush4}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Background"
+                                    Value="{DynamicResource ColorBrushGray4}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ========== 次按钮（PCL2 MyButton，35 高描边） ==========
+         MyButton.xaml:6  CornerRadius=3、BorderThickness=1、BorderBrush=ColorBrush1
+         MyButton.xaml:3  Background=ColorBrushHalfWhite #55FFFFFF
+         MyButton.xaml:10 文字 13px，颜色跟随边框（模板里 Binding BorderBrush）
+         MyButton.xaml.vb:160-170 禁用 = 边框 Gray4 + 底 Gray6
+         悬停底 ColorBrush7 由基线 PlainButton 模板的 HoverBg 提供（ColorBrushButtonHoverBg=ColorBrush7）。
+         使用：浏览…、取消、上一页/下一页、插件页操作按钮、搜索行内「详情」「下载」。 -->
+    <Style x:Key="SecondaryButton" TargetType="Button" BasedOn="{StaticResource PlainButton}">
+        <Setter Property="Height" Value="35" />
+        <Setter Property="MinWidth" Value="76" />
+        <Setter Property="Padding" Value="14,0" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Background" Value="{DynamicResource ColorBrushHalfWhite}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource ColorBrush1}" />
+    </Style>
+
+    <!-- ========== 插件页 DataGrid（PCL2 观感：无粗边框、36 行高、浅色表头） ==========
+         PCL2 没有 DataGrid；行高取左栏列表项 36（PageDownloadLeft.xaml:8），
+         表头沿用基线 PlainDataGridColumnHeader（12px SemiBold、ColorBrush8 底），
+         只把 DataGrid 的 1px 边框去掉、底色改透明、行高与表头高度显式化。 -->
+    <Style x:Key="JmlDataGrid" TargetType="DataGrid" BasedOn="{StaticResource PlainDataGrid}">
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="RowHeight" Value="36" />
+        <Setter Property="ColumnHeaderHeight" Value="34" />
+        <Setter Property="GridLinesVisibility" Value="Horizontal" />
+        <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource ColorBrushGray7}" />
+        <Setter Property="AlternatingRowBackground" Value="Transparent" />
+        <Setter Property="SelectionMode" Value="Single" />
+        <Setter Property="HeadersVisibility" Value="Column" />
+        <Setter Property="CanUserResizeRows" Value="False" />
     </Style>
 
 </ResourceDictionary>

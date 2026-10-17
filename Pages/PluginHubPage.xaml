@@ -1,6 +1,10 @@
 <!--
-    插件页主体（阶段 1）
+    插件页主体（阶段 1，2026-10-17 页面层 PCL2 化）
     左侧栏（宽 160）：插件管理 / 插件功能 两个选项；右侧为对应内容视图。
+    参数来源：docs/20261017_PCL2界面视觉规格_v1.0.md B 节：
+      左栏底色 #F1FFFFFF（FormMain.xaml:144 / Application.xaml:66）；
+      左右分界是左栏右侧 4 宽渐变阴影（黑 4% → 透明，FormMain.xaml:145-152），不是 1px 边框；
+      列表距标题栏 12、列表项行高 36、选中条 5×（行高−12）。
     顶部返回栏由 MainWindow 统一处理，本页只负责栏内切换。
 -->
 <UserControl x:Class="JML.Pages.PluginHubPage"
@@ -12,20 +16,27 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <!-- 左侧栏 -->
-        <Border Grid.Column="0"
-                Background="{DynamicResource ColorBrushBackground}"
-                BorderBrush="{DynamicResource ColorBrushGray6}"
-                BorderThickness="0,0,1,0">
-            <StackPanel Margin="8,12">
+        <!-- 左侧栏：PCL2 的 #F1FFFFFF 半透明白，无右边框 -->
+        <Border x:Name="LeftColumn"
+                Grid.Column="0"
+                Background="{StaticResource JmlSidebarBackground}">
+            <StackPanel Margin="0,12,0,0">
                 <RadioButton x:Name="TabManage" Content="插件管理"
                              Style="{StaticResource SideListItem}"
                              IsChecked="True" Checked="Tab_Checked" />
                 <RadioButton x:Name="TabFeatures" Content="插件功能"
                              Style="{StaticResource SideListItem}"
-                             Margin="0,4,0,0" Checked="Tab_Checked" />
+                             Checked="Tab_Checked" />
             </StackPanel>
         </Border>
+
+        <!-- 左右分界：4 宽渐变阴影（PCL2 RectLeftShadow 原参数），贴在左栏右侧的内容区上 -->
+        <Rectangle x:Name="LeftShadow"
+                   Grid.Column="1"
+                   Width="4"
+                   HorizontalAlignment="Left"
+                   IsHitTestVisible="False"
+                   Fill="{StaticResource JmlSidebarShadow}" />
 
         <!-- 右侧内容区 -->
         <ContentControl x:Name="ContentArea" Grid.Column="1" />
