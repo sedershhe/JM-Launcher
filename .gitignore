@@ -10,6 +10,10 @@ obj/
 .idea/
 .vscode/
 
+# 临时/待删除文件（含 ACL 修复备份）
+Delete/
+Draw/
+
 # NuGet
 *.nupkg
 
