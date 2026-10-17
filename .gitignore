@@ -32,3 +32,13 @@ option.yml
 __pycache__/
 *.pyc
 .venv/
+
+# pytest 本地测试环境（子代理变通方案产生，不入库）
+_pytest_env/
+_pytest_wheels/
+_pytest_tmp/
+_pt_bt/
+_pt_tmp/
+pip-*/
+pytest-cache-files-*/
+test_config_probe.py
