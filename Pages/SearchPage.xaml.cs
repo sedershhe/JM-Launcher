@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using JML.Bridge;
 using JML.Bridge.Dto;
@@ -31,6 +32,9 @@ public partial class SearchPage : UserControl
     private int _currentPage = 1;
     private int _totalPages = 1;
     private List<SearchRow> _rows = [];
+
+    /// <summary>搜索期间正在播放的加载指示 Storyboard（结束/异常时 Remove，保证不残留）。</summary>
+    private Storyboard? _loadingStoryboard;
 
     /// <summary>搜索调用（测试可替换；生产默认走 <see cref="SearchBridge.Search"/>）。</summary>
     internal Func<string, int, Task<SearchResultPageDto>> SearchInvoker { get; set; } =
@@ -205,10 +209,71 @@ public partial class SearchPage : UserControl
         {
             BtnPrev.IsEnabled = false;
             BtnNext.IsEnabled = false;
+            StartLoadingAnimation();
         }
         else
         {
+            StopLoadingAnimation();
             UpdatePagingState();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 加载指示（PCL2 MyLoading 的挥镐循环）
+    // ------------------------------------------------------------------
+
+    /// <summary>搜索开始：显示指示并启动 2.58s 循环（重复调用不会叠出多条时钟）。</summary>
+    private void StartLoadingAnimation()
+    {
+        LoadingOverlay.Visibility = Visibility.Visible;
+        LoadingRotate.Angle = 55;
+
+        if (_loadingStoryboard is not null)
+        {
+            return;
+        }
+
+        if (Resources["LoadingSwingStoryboard"] is Storyboard storyboard)
+        {
+            _loadingStoryboard = storyboard;
+            storyboard.Begin(this, isControllable: true);
+        }
+    }
+
+    /// <summary>搜索结束/失败：移除时钟并把角度复位，界面不残留动画（任务 4）。</summary>
+    private void StopLoadingAnimation()
+    {
+        if (_loadingStoryboard is not null)
+        {
+            _loadingStoryboard.Remove(this);
+            _loadingStoryboard = null;
+        }
+
+        // Remove 之后再把镐子上的动画显式清掉（避免 Freezable 上残留时钟）。
+        LoadingRotate.BeginAnimation(RotateTransform.AngleProperty, null);
+        LoadingOverlay.Visibility = Visibility.Collapsed;
+        LoadingRotate.Angle = 55;
+    }
+
+    /// <summary>测试用：加载指示当前是否显示。</summary>
+    internal Visibility LoadingOverlayVisibilityForTest => LoadingOverlay.Visibility;
+
+    /// <summary>测试用：镐子当前角度（复位后应为初始 55°）。</summary>
+    internal double LoadingAngleForTest => LoadingRotate.Angle;
+
+    /// <summary>测试用：镐子的旋转动画是否在跑（隐藏后必须为 false，证明没有残留）。</summary>
+    internal bool LoadingAnimatedForTest => LoadingRotate.HasAnimatedProperties;
+
+    /// <summary>测试用：直接驱动加载指示（不发起真实搜索）。</summary>
+    internal void SetLoadingForTest(bool visible)
+    {
+        if (visible)
+        {
+            StartLoadingAnimation();
+        }
+        else
+        {
+            StopLoadingAnimation();
         }
     }
 

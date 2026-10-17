@@ -40,7 +40,7 @@ public class UiSmokeTests
     /// <summary>
     /// 在 UI 线程上执行一段断言；异常（含断言失败）原样抛回调用方。
     /// </summary>
-    private static void RunOnUiThread(Action action)
+    internal static void RunOnUiThread(Action action)
     {
         Exception? failure = null;
         using var done = new ManualResetEventSlim(false);
@@ -121,7 +121,7 @@ public class UiSmokeTests
     }
 
     /// <summary>按名字取控件；取不到直接失败，并说明是哪个根元素。</summary>
-    private static T Find<T>(FrameworkElement root, string name) where T : class
+    internal static T Find<T>(FrameworkElement root, string name) where T : class
     {
         object? found = root.FindName(name);
         if (found is not T typed)

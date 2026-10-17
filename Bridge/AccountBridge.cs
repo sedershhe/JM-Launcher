@@ -122,3 +122,44 @@ public static class AccountBridge
         }
     }
 }
+
+/// <summary>
+/// 账号操作抽象：生产实现 <see cref="AccountGateway"/> 只转发到 <see cref="AccountBridge"/>，
+/// 测试可注入假实现，离线断言「使用已保存账号登录」的调用顺序与失败形态。
+///
+/// 纪律：接口只暴露既有桥接入口，不新增 Python 契约；密码只作为参数传递，不进入任何结果。
+/// </summary>
+internal interface IAccountGateway
+{
+    Task<AccountStatusDto> SetCredentials(string username, string password);
+
+    Task<AccountStatusDto> Login();
+
+    Task<AccountStatusDto> Logout();
+
+    Task<AccountStatusDto> Clear();
+
+    Task<AccountStatusDto> Status();
+}
+
+/// <summary>生产用账号网关：逐项转发到静态 <see cref="AccountBridge"/>，不复制任何业务判断。</summary>
+internal sealed class AccountGateway : IAccountGateway
+{
+    /// <summary>无状态单例，供窗口/页面默认构造使用。</summary>
+    public static AccountGateway Instance { get; } = new();
+
+    private AccountGateway()
+    {
+    }
+
+    public Task<AccountStatusDto> SetCredentials(string username, string password) =>
+        AccountBridge.SetCredentials(username, password);
+
+    public Task<AccountStatusDto> Login() => AccountBridge.Login();
+
+    public Task<AccountStatusDto> Logout() => AccountBridge.Logout();
+
+    public Task<AccountStatusDto> Clear() => AccountBridge.Clear();
+
+    public Task<AccountStatusDto> Status() => AccountBridge.Status();
+}

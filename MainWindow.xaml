@@ -8,7 +8,11 @@
                   四个 27 高胶囊导航、右侧 28×28 最小化/关闭（右边距 12/44）。
       内页态（A2）：返回箭头 28×28 + 页面名 15px，主导航隐藏。
     三层骨架保持：顶部标题栏 + 内容区；左侧二级目录仍由 PluginHubPage 自己承载。
-    转场动画按本轮要求不做。
+    动画（2026-10-17 追加，参数来源 docs/20261017_PCL2动效规格_v1.0.md 第 1 节）：
+      窗口入场 = PanBack 的 TranslateY 60→0/600ms/Back弱 + Rotate -4→0/500ms/Back弱
+                 + Window.Opacity 0→1/250ms，全部延迟 100ms；起始值写在 XAML，
+                 动画在 MainWindow.xaml.cs 的 Loaded 里启动，结束后把 RenderTransform 归零。
+      禁止动画 Window.Top/Left、禁止整窗 Effect（规格 1.3 / 13.2）。
 -->
 <Window x:Class="JML.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -20,6 +24,7 @@
         WindowStyle="None"
         AllowsTransparency="True"
         Background="{x:Null}"
+        Opacity="0"
         ResizeMode="CanResize"
         FontFamily="Microsoft YaHei UI"
         SnapsToDevicePixels="True"
@@ -28,8 +33,17 @@
         MouseMove="Window_MouseMove"
         MouseLeftButtonUp="Window_MouseLeftButtonUp">
 
-    <!-- 外层 Margin=10：透明阴影区（PCL2 PanBack Margin=10） -->
-    <Grid x:Name="PanBack" Margin="10" SnapsToDevicePixels="True" UseLayoutRounding="True">
+    <!-- 外层 Margin=10：透明阴影区（PCL2 PanBack Margin=10）
+         入场动画作用在这层（PCL2 FormMain.xaml:17-18 的 Rotate -4 / TranslateY 60），
+         不碰 Window.Top/Left，避免每帧移动原生窗口。动画结束时由代码把 RenderTransform 置空。 -->
+    <Grid x:Name="PanBack" Margin="10" SnapsToDevicePixels="True" UseLayoutRounding="True"
+          RenderTransformOrigin="0.5,0.5">
+        <Grid.RenderTransform>
+            <TransformGroup>
+                <RotateTransform x:Name="WindowEntryRotate" Angle="-4" />
+                <TranslateTransform x:Name="WindowEntryTranslate" X="0" Y="60" />
+            </TransformGroup>
+        </Grid.RenderTransform>
 
         <!-- ===== 自绘阴影 + 缩放命中区（PCL2 FormMain.xaml:21-88 原参数） =====
              上/下 8 高、左/右 8 宽、四角 13×13；边为线性渐变，角为径向渐变；
@@ -142,8 +156,14 @@
                       Background="{DynamicResource ColorBrush4}"
                       MouseLeftButtonDown="PanTitle_MouseLeftButtonDown">
 
-                    <!-- 主模式：文字 logo + 居中一级导航（PCL2 三段式 1*/Auto/1*） -->
-                    <Grid x:Name="MainHeader">
+                    <!-- 主模式：文字 logo + 居中一级导航（PCL2 三段式 1*/Auto/1*）
+                         内页切换动效作用在本层：Opacity 1→0/150 + TranslateX 0→12/150；
+                         返回时 0→1/150（延迟 200）+ TranslateX 12→0/350（延迟 200，Back 弱）。
+                         Margin 尺寸不变，位移只走 RenderTransform（规格 13.2-3）。 -->
+                    <Grid x:Name="MainHeader" RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <TranslateTransform x:Name="MainHeaderShift" X="0" />
+                        </Grid.RenderTransform>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="1*" />
                             <ColumnDefinition Width="Auto" />
@@ -251,8 +271,14 @@
                         </StackPanel>
                     </Grid>
 
-                    <!-- 内页模式：返回箭头 28×28 + 页面名 15px（PCL2 FormMain.xaml:133-137） -->
-                    <Grid x:Name="InnerHeader" Visibility="Collapsed">
+                    <!-- 内页模式：返回箭头 28×28 + 页面名 15px（PCL2 FormMain.xaml:133-137）
+                         动画：Opacity 0→1/150（延迟 200）+ TranslateX -16→0/350（延迟 200，Back 中）；
+                         返回镜像：1→0/150 + 0→-18/150（EaseInFluent3）。 -->
+                    <Grid x:Name="InnerHeader" Visibility="Collapsed" Opacity="0"
+                          RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <TranslateTransform x:Name="InnerHeaderShift" X="-16" />
+                        </Grid.RenderTransform>
                         <Button x:Name="BtnBack"
                                 Style="{StaticResource TitleIconButton}"
                                 HorizontalAlignment="Left"

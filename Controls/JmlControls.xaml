@@ -47,8 +47,12 @@
          MyRadioButton.xaml:6  图标 Path Margin=12,0,0,0、MaxHeight/MaxWidth=16、Stretch=Uniform、Fill=White
          MyRadioButton.xaml:7  文字 Margin=8,0,12,0、前景 White、字号继承 13
          FormMain.xaml:121-130 每项 Margin=5,0、Padding=2,0
-         MyRadioButton.xaml.vb:166/184/178-181 悬停白 50、按下 #78EAF2FE、选中纯白底 + ColorBrush3 字色
-         图标由使用方（MainWindow）放进 RadioButton 内容，以便每项单独 LogoScale。 -->
+         MyRadioButton.xaml.vb:166/167/168/184 悬停 90ms、移出 150ms、勾选 120ms、按下 60ms
+         MyRadioButton.xaml.vb:191 悬停底 MyColor(50, Color8) = #32EAF2FE（JML 旧值 #32FFFFFF 已按 PCL2 改正）
+         MyRadioButton.xaml.vb:184 按下底 MyColor(120, Color8) = #78EAF2FE
+         MyRadioButton.xaml.vb:181 选中底纯白 + 字色 ColorBrush3
+         动效落点：悬停/按下各一层自绘底色，由 MainWindow.xaml.cs 的 NavMotion 按状态机
+         淡入淡出；模板只保留 IsChecked 的静态白色，保证回归测试与无动画路径可用。 -->
     <Style x:Key="NavRadioButton" TargetType="RadioButton">
         <Setter Property="OverridesDefaultStyle" Value="True" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
@@ -69,17 +73,24 @@
                             Padding="{TemplateBinding Padding}"
                             SnapsToDevicePixels="False"
                             UseLayoutRounding="False">
-                        <ContentPresenter HorizontalAlignment="Center"
-                                          VerticalAlignment="Center"
-                                          Margin="12,0,12,0" />
+                        <Grid>
+                            <!-- 悬停底 #32EAF2FE / 按下底 #78EAF2FE：元素 Opacity 由 NavMotion 驱动。 -->
+                            <Border x:Name="HoverLayer"
+                                    Background="#32EAF2FE"
+                                    CornerRadius="13.5"
+                                    Opacity="0"
+                                    IsHitTestVisible="False" />
+                            <Border x:Name="PressLayer"
+                                    Background="#78EAF2FE"
+                                    CornerRadius="13.5"
+                                    Opacity="0"
+                                    IsHitTestVisible="False" />
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="12,0,12,0" />
+                        </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#32FFFFFF" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#78EAF2FE" />
-                        </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="Root" Property="Background"
                                     Value="{DynamicResource ColorBrushWhite}" />
@@ -93,8 +104,11 @@
 
     <!-- ========== 标题栏圆形图标按钮（PCL2 MyIconButton Theme=White） ==========
          MyIconButton.xaml:4-6  CornerRadius=1000、Path Margin=5、Stretch=Uniform
-         MyIconButton.xaml.vb:116-117 悬停底色白 20%（MyColor(50,255,255,255)）
+         MyIconButton.xaml.vb:117 悬停底色白 20%（MyColor(50,255,255,255)=#32FFFFFF），时长 120ms（:160）
          MyIconButton.xaml.vb:130-131 Theme=White → Path.Fill=ColorBrush8 #EAF2FE
+         MyIconButton.xaml.vb:70 按下内容缩放 1→0.8/400ms；:77-78 抬起 0.8→1.0（250ms，复合）
+         动效落点：底色用 HoverLayer/PressLayer 的元素 Opacity，缩放由 IconButtonMotion
+         （MainWindow.xaml.cs）在按钮 RenderTransform 上做，模板不参与缩放。
          28×28 与右边距 12/44 由使用方（MainWindow）设置。 -->
     <Style x:Key="TitleIconButton" TargetType="Button">
         <Setter Property="OverridesDefaultStyle" Value="True" />
@@ -112,17 +126,16 @@
                             CornerRadius="1000"
                             SnapsToDevicePixels="False"
                             UseLayoutRounding="False">
-                        <ContentPresenter HorizontalAlignment="Center"
-                                          VerticalAlignment="Center" />
+                        <Grid>
+                            <Border x:Name="HoverLayer"
+                                    Background="#32FFFFFF"
+                                    CornerRadius="1000"
+                                    Opacity="0"
+                                    IsHitTestVisible="False" />
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Grid>
                     </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#32FFFFFF" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#4DFFFFFF" />
-                        </Trigger>
-                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
@@ -135,7 +148,11 @@
          MyListItem.xaml.vb:316-320 选中条宽 5、CornerRadius=2、Margin=-1,6,0,6（高度=行高−12）、色 ColorBrush3
          MyListItem.xaml.vb:470 行高 <40 时选中文字色 ColorBrush3
          MyListItem.xaml.vb:580/597 悬停底 ColorBrushBg1 #BEE0EAFD、按下底 ColorBrush6
-         PageDownloadLeft.xaml:8 IsScaleAnimationEnabled=False → 不做 0.98 缩放 -->
+         MyListItem.xaml.vb:575-600 悬停进 120ms（背景/底色）、移出 180ms；按下同 120ms
+         PageDownloadLeft.xaml:8 IsScaleAnimationEnabled=False → 不做 0.98 缩放
+         动效落点：悬停/按下各一层底色做 Opacity 淡入淡出（不触发布局）；选中条
+         Visibility 保持原触发器（回归测试依赖），另用 200ms 的 Opacity/ScaleY + 一层
+         ColorBrush2 淡出的 Tint 做“颜色过渡”，不直接动画共享主题画刷。 -->
     <Style x:Key="SideListItem" TargetType="RadioButton">
         <Setter Property="OverridesDefaultStyle" Value="True" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
@@ -153,13 +170,39 @@
                         <Border x:Name="Root"
                                 Background="Transparent"
                                 SnapsToDevicePixels="False" />
+                        <Border x:Name="HoverLayer"
+                                Background="{DynamicResource ColorBrushBg1}"
+                                Opacity="0"
+                                IsHitTestVisible="False" />
+                        <Border x:Name="PressLayer"
+                                Background="{DynamicResource ColorBrush6}"
+                                Opacity="0"
+                                IsHitTestVisible="False" />
                         <Rectangle x:Name="SelectionBar"
                                    Width="5"
                                    HorizontalAlignment="Left"
                                    VerticalAlignment="Stretch"
                                    Margin="-1,6,0,6"
                                    RadiusX="2" RadiusY="2"
+                                   Opacity="0"
+                                   RenderTransformOrigin="0.5,0.5"
                                    Fill="{DynamicResource ColorBrush3}"
+                                   Visibility="Collapsed">
+                            <Rectangle.RenderTransform>
+                                <ScaleTransform ScaleX="1" ScaleY="0.7" />
+                            </Rectangle.RenderTransform>
+                        </Rectangle>
+                        <!-- 选中瞬间的浅色底：从 ColorBrush2 淡出，露出下面的 ColorBrush3，
+                             形成“选中条颜色过渡”（不直接动画共享主题画刷）。 -->
+                        <Rectangle x:Name="SelectionBarTint"
+                                   Width="5"
+                                   HorizontalAlignment="Left"
+                                   VerticalAlignment="Stretch"
+                                   Margin="-1,6,0,6"
+                                   RadiusX="2" RadiusY="2"
+                                   Opacity="1"
+                                   Fill="{DynamicResource ColorBrush2}"
+                                   IsHitTestVisible="False"
                                    Visibility="Collapsed" />
                         <ContentPresenter HorizontalAlignment="Left"
                                           VerticalAlignment="Center"
@@ -167,16 +210,81 @@
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Background"
-                                    Value="{DynamicResource ColorBrushBg1}" />
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1" Duration="0:0:0.120" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="0" Duration="0:0:0.180" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Root" Property="Background"
-                                    Value="{DynamicResource ColorBrush6}" />
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="PressLayer"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1" Duration="0:0:0.120" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="PressLayer"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="0" Duration="0:0:0.180" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="SelectionBar" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="SelectionBarTint" Property="Visibility" Value="Visible" />
                             <Setter Property="Foreground" Value="{DynamicResource ColorBrush3}" />
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <!-- 选中条本体：200ms 淡入 + 300ms 纵向落位（RenderTransform，不触发布局） -->
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1" Duration="0:0:0.200" />
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                         To="1" Duration="0:0:0.300" />
+                                        <!-- 浅色 Tint 200ms 淡出 → 颜色从 ColorBrush2 过渡到 ColorBrush3 -->
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBarTint"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="0" Duration="0:0:0.200" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="0" Duration="0:0:0.120" />
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                         To="0.7" Duration="0:0:0.120" />
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBarTint"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1" Duration="0:0:0.120" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -198,7 +306,10 @@
          MyExtraTextButton.xaml:12-22    CornerRadius=ActualHeight×0.4（52×0.4=20.8）、
                                          底 ColorBrush3、字 ColorBrush8 16px、
                                          DropShadowEffect ShadowDepth=0 BlurRadius=10 Opacity=0.2
-         MyExtraTextButton.xaml.vb:150-154 悬停 ColorBrush4、禁用 ColorBrushGray4
+         MyExtraTextButton.xaml.vb:140/143 悬停底 ColorBrush4（120ms）、常态回 ColorBrush3（150ms）
+         MyExtraTextButton.xaml.vb:150-154 禁用 ColorBrushGray4
+         动效落点：悬停用一层 ColorBrush4 覆盖层做 120ms Opacity 淡入、150ms 淡出；
+         不动画 DropShadowEffect（规格 13.2-2 / 13.3 补充）。按下缩放本轮未做（任务只要求悬停颜色）。
          使用：下载页「开始下载」、搜索页「搜索」、详情窗「下载本子」。 -->
     <Style x:Key="PrimaryButton" TargetType="Button">
         <Setter Property="OverridesDefaultStyle" Value="True" />
@@ -219,7 +330,6 @@
                     <Border x:Name="Root"
                             Background="{TemplateBinding Background}"
                             CornerRadius="20.8"
-                            Padding="{TemplateBinding Padding}"
                             SnapsToDevicePixels="False"
                             UseLayoutRounding="False">
                         <Border.Effect>
@@ -229,13 +339,38 @@
                                               BlurRadius="10"
                                               Opacity="0.2" />
                         </Border.Effect>
-                        <ContentPresenter HorizontalAlignment="Center"
-                                          VerticalAlignment="Center" />
+                        <Grid>
+                            <!-- 悬停底色 ColorBrush4：120ms 淡入 / 150ms 淡出（不触发布局） -->
+                            <Border x:Name="HoverLayer"
+                                    Background="{DynamicResource ColorBrush4}"
+                                    CornerRadius="20.8"
+                                    Opacity="0"
+                                    IsHitTestVisible="False" />
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Background"
-                                    Value="{DynamicResource ColorBrush4}" />
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1" Duration="0:0:0.120" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="0" Duration="0:0:0.150" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Root" Property="Background"

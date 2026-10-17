@@ -25,14 +25,23 @@
                                TextWrapping="Wrap"
                                Foreground="{DynamicResource ColorBrush1}" />
                     <TextBlock Margin="0,6,0,10"
-                               Text="账号凭据保存在 Windows 凭据管理器；不可用时回退到 DPAPI 加密文件，不会写入 settings.json 或日志。"
+                               Text="账号凭据保存在 Windows 凭据管理器；不可用时回退到 DPAPI 加密文件，不会写入 settings.json 或日志。启动时不会自动登录，可按需使用已保存账号登录。"
                                TextWrapping="Wrap"
                                Foreground="{DynamicResource ColorBrushGray3}" />
-                    <Button x:Name="BtnAccount"
-                            Content="登录 / 管理账号"
-                            Style="{StaticResource SecondaryButton}"
-                            HorizontalAlignment="Left"
-                            Click="BtnAccount_Click" />
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="BtnAccount"
+                                Content="登录 / 管理账号"
+                                Style="{StaticResource SecondaryButton}"
+                                HorizontalAlignment="Left"
+                                Click="BtnAccount_Click" />
+                        <!-- 有保存凭据但未登录时才显示：重启后免重输密码。 -->
+                        <Button x:Name="BtnLoginSaved"
+                                Content="使用已保存账号登录"
+                                Margin="8,0,0,0"
+                                Visibility="Collapsed"
+                                Style="{StaticResource SecondaryButton}"
+                                Click="BtnLoginSaved_Click" />
+                    </StackPanel>
                 </StackPanel>
             </ctl:JmlCard>
 

@@ -8,6 +8,10 @@
       标题行高 40（MyCard.vb:325 / PageDownloadInstall.xaml:31 内容从 40 开始）；
       内容默认内边距 20,40,18,15（PageDownloadInstall.xaml:31），由 JmlCard.cs
                 重写 Padding 默认值提供，使用方可按页面覆盖（搜索卡 25,40,25,15 等）。
+    动效（docs/20261017_PCL2动效规格_v1.0.md 7.1）：悬停 90ms 线性，标题色
+                ColorBrush1→ColorBrush2 + 独立阴影图层 CardShadowHover 的元素 Opacity
+                0.07→0.4（叠加在常态紧阴影上），由 Controls\JmlCard.xaml.cs 驱动；
+                绝不逐帧改 DropShadowEffect.Opacity（规格 13.2-2）。
     主题色一律引用主题资源键；#F5FFFFFF 是 PCL2 MyCard.vb:70 的原值，按任务约定只在此处写一次。
 
     为什么是 ContentControl + ResourceDictionary 而不是 UserControl 自带 XAML：
@@ -42,6 +46,25 @@
                                 <DropShadowEffect BlurRadius="3"
                                                   ShadowDepth="0"
                                                   Opacity="0.07"
+                                                  Color="{DynamicResource ColorObject1}" />
+                            </Border.Effect>
+                        </Border>
+
+                        <!-- 悬停阴影层（PCL2 MyCard.vb:184-185 的 MainChrome.Opacity 0.07→0.4）：
+                             独立图层，只动本元素的 Opacity（由 JmlCard.cs 驱动），
+                             绝不逐帧改 DropShadowEffect.Opacity（规格 13.2-2）。
+                             本层基础值 0，常态 0.07 由上面 CardShadow 的紧阴影提供；
+                             悬停时本层补到 0.33，两层合计 ≈0.40，静态观感不变。 -->
+                        <Border x:Name="CardShadowHover"
+                                Margin="-3,-3,-3,-4"
+                                CornerRadius="5"
+                                Background="{StaticResource JmlCardBackground}"
+                                Opacity="0"
+                                IsHitTestVisible="False">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="3"
+                                                  ShadowDepth="0"
+                                                  Opacity="0.4"
                                                   Color="{DynamicResource ColorObject1}" />
                             </Border.Effect>
                         </Border>
