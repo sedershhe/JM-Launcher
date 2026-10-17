@@ -8,6 +8,8 @@
             <ResourceDictionary.MergedDictionaries>
                 <!-- PCL2 风格主题入口（PlainToolkit.UI） -->
                 <ResourceDictionary Source="pack://application:,,,/PlainToolkit.UI;component/Themes/Generic.xaml" />
+                <!-- JML 自定义控件样式（顶部导航按钮 / 左侧栏列表项） -->
+                <ResourceDictionary Source="Controls/JmlControls.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

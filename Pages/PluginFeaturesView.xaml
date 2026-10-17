@@ -1,0 +1,33 @@
+<!--
+    插件功能视图（阶段 1）
+    列出已加载且未禁用插件声明的功能页面，点击进入内页（占位页）。
+    数据来源与插件管理视图一致：PluginBridge.Bootstrap。
+-->
+<UserControl x:Class="JML.Pages.PluginFeaturesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ListBox x:Name="FeatureList"
+                 MouseDoubleClick="FeatureList_MouseDoubleClick">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Margin="4,2">
+                        <TextBlock Text="{Binding PageTitle}" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding PluginName}"
+                                   Foreground="{DynamicResource ColorBrushGray3}" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <TextBlock x:Name="TextStatus" Grid.Row="1"
+                   Margin="0,8,0,0"
+                   Foreground="{DynamicResource ColorBrushGray3}"
+                   TextWrapping="Wrap" />
+    </Grid>
+</UserControl>

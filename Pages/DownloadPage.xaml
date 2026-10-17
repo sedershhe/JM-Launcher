@@ -1,0 +1,68 @@
+<!--
+    下载页（阶段 1：仅界面框架）
+    布局：上方输入区（地址输入 + 目录选择 + 开始/取消），下方日志区。
+    业务逻辑（下载/搜索接口调用）在阶段 2 由 backend-agent 实现，本页不接事件。
+-->
+<UserControl x:Class="JML.Pages.DownloadPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 上方：输入与操作区 -->
+        <ContentControl Grid.Row="0" Style="{StaticResource PlainCard}">
+            <StackPanel>
+                <TextBlock Text="下载功能（阶段 2 实现）" FontSize="15" FontWeight="SemiBold" />
+                <TextBlock Text="输入本子地址或编号，选择保存目录后开始下载。"
+                           Margin="0,4,0,12"
+                           Foreground="{DynamicResource ColorBrushGray3}" />
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="地址：" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <TextBox x:Name="InputUrl" Grid.Column="1"
+                             ToolTip="支持本子地址或编号" />
+                </Grid>
+
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="保存目录：" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <TextBox x:Name="InputDir" Grid.Column="1" IsReadOnly="True" />
+                    <Button x:Name="BtnBrowse" Grid.Column="2" Content="浏览…" Margin="8,0,0,0" />
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                    <Button x:Name="BtnStart" Content="开始下载" />
+                    <Button x:Name="BtnCancel" Content="取消" Margin="10,0,0,0" IsEnabled="False" />
+                </StackPanel>
+            </StackPanel>
+        </ContentControl>
+
+        <!-- 下方：日志区 -->
+        <ContentControl Grid.Row="1" Style="{StaticResource PlainCard}" Margin="0,12,0,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="下载日志" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <TextBox x:Name="LogBox" Grid.Row="1"
+                         IsReadOnly="True"
+                         AcceptsReturn="True"
+                         VerticalScrollBarVisibility="Auto"
+                         TextWrapping="Wrap"
+                         FontFamily="Consolas" FontSize="12" />
+            </Grid>
+        </ContentControl>
+    </Grid>
+</UserControl>

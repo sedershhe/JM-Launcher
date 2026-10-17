@@ -1,0 +1,19 @@
+<!--
+    插件功能页占位（阶段 1）
+    PushInner 进入插件功能页时展示的占位内容；真正的页面模板（list/browser/action/form）
+    在阶段 4 由 Python 侧驱动渲染。
+-->
+<UserControl x:Class="JML.Pages.PluginPagePlaceholder"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="16">
+        <ContentControl Style="{StaticResource PlainCard}" VerticalAlignment="Top">
+            <StackPanel>
+                <TextBlock x:Name="TextTitle" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="功能实现中（阶段 4 实现）"
+                           Margin="0,8,0,0"
+                           Foreground="{DynamicResource ColorBrushGray3}" />
+            </StackPanel>
+        </ContentControl>
+    </Grid>
+</UserControl>
