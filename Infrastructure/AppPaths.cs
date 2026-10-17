@@ -28,11 +28,21 @@ public static class AppPaths
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JML", "cache");
 
     /// <summary>
+    /// 下载临时工作目录：%LOCALAPPDATA%\JML\tmp。
+    /// 启动下载时必须显式传给 Python 的 work_dir，避免崩溃残留落到用户下载夹（契约 §九.4）。
+    /// </summary>
+    public static string TempDirectory { get; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JML", "tmp");
+
+    /// <summary>
     /// 确保所有目录存在。应在应用启动时调用一次。
     /// </summary>
     public static void EnsureCreated()
     {
-        foreach (string dir in new[] { ConfigDirectory, DataDirectory, LogDirectory, CacheDirectory })
+        foreach (string dir in new[]
+                 {
+                     ConfigDirectory, DataDirectory, LogDirectory, CacheDirectory, TempDirectory,
+                 })
         {
             Directory.CreateDirectory(dir);
         }

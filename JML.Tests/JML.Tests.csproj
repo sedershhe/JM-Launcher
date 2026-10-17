@@ -19,4 +19,12 @@
     <ProjectReference Include="..\JML.csproj" />
   </ItemGroup>
 
+  <!-- 当前受限令牌环境（DSH 沙箱）下 testhost 无法 OpenProcess 父进程，
+       vstest 会以 Win32Exception(5) 直接中止。Microsoft.TestPlatform.TestHost.targets
+       用 _MSTestEnableParentProcessQuery 生成 AppContext 开关（默认 true）；
+       这里显式设为 false，仅关闭测试宿主的父进程存活监视，不影响产品代码。 -->
+  <PropertyGroup>
+    <_MSTestEnableParentProcessQuery>false</_MSTestEnableParentProcessQuery>
+  </PropertyGroup>
+
 </Project>

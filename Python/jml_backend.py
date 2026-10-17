@@ -15,10 +15,12 @@
     set_event_sink(callback) -> str                注册事件出口；callback(事件 JSON 字符串)
     clear_event_sink() -> str                      移除事件出口
     parse_book_ids(text: str) -> str               编号解析，返回 JSON
-    start_download(book_ids_json: str, target_dir: str) -> str
+    start_download(book_ids_json: str, target_dir: str, work_dir: str = "") -> str
                                                    登记批次后**立即返回** JSON（后台线程下载）
     cancel_download(batch_id: str) -> str          真取消（set 取消事件，不等待）
-    search(keyword: str, page: int) -> str         搜索/翻页，返回 JSON
+    get_progress(batch_id: str) -> str             查询批次状态，返回 JSON（契约 §3.16）
+    search(keyword: str, page: int, session_key: str = "main") -> str
+                                                   搜索/翻页，返回 JSON
     get_detail(book_id: str) -> str                详情，返回 JSON
     fetch_cover(book_id: str) -> bytes | None      封面原图字节（唯一非 JSON 入口）
     emit_test_event(event_type: str, payload: dict) -> str
@@ -166,7 +168,7 @@ def bootstrap(plugins_dir: str) -> str:
 
         {
           "ok": bool,
-          "loaded":  [ {"id", "name", "version", "pages": [...],
+          "loaded":  [ {"id", "name", "version", "description", "pages": [...],
                         "development_sample": bool} ],
           "failed":  [ {"id", "reason"} ],
           "services": {"archive_reader": 1, "jm.search": 1, ...}
@@ -235,6 +237,7 @@ def list_plugins(plugins_dir: str) -> str:
                 "id": manifest["id"],
                 "name": manifest["name"],
                 "version": manifest["version"],
+                "description": manifest["description"],
                 "pages": list(manifest["pages"]),
                 "development_sample": manifest["development_sample"],
             }
@@ -390,6 +393,31 @@ def cancel_download(batch_id: str) -> str:
         if not downloader.cancel_batch(identity):
             return _dumps(make_error(ERROR_BATCH_NOT_FOUND, f"找不到下载批次: {identity}"))
         return _dumps({"ok": True, "batch_id": identity, "cancelled": True})
+    except Exception as exc:
+        return _failure(exc)
+
+
+def get_progress(batch_id: str) -> str:
+    """查询下载批次状态，返回 JSON（契约 §3.16；字段见 §四的 BatchStatus）。
+
+    成功::
+
+        {"ok": true, "batch_id": str, "status": "running"|"finished",
+         "total": int, "cancel_requested": bool, "result": dict|null}
+
+    失败（不向 C# 抛异常）：
+    - 空批次号 → ``INVALID_ARGUMENT``；
+    - 未知批次 → ``BATCH_NOT_FOUND``，``error_message`` 含传入 id。
+
+    锁纪律：本入口无新增共享状态，不需要占用 ``_STATE_LOCK``；批次登记表由
+    ``downloader`` 自己的锁保护，本入口只读取状态副本。不新增单例，也不在
+    C# 侧另走宿主服务或后端私有函数。
+    """
+    try:
+        identity = str(batch_id or "").strip()
+        if not identity:
+            return _dumps(make_error(ERROR_INVALID_ARGUMENT, "批次号不能为空"))
+        return _dumps(downloader.get_batch_status(identity))
     except Exception as exc:
         return _failure(exc)
 

@@ -113,7 +113,7 @@ def load_all(plugins_dir: str) -> dict:
 
     返回:
         {
-          "loaded":  [ {id, name, version, pages, development_sample} ],
+          "loaded":  [ {id, name, version, description, pages, development_sample} ],
           "failed":  [ {id, reason} ],        # 含 discover 阶段的坏目录
           "services": {name: version},        # 装配后注册表快照
         }
@@ -148,6 +148,7 @@ def load_all(plugins_dir: str) -> dict:
                 "id": plugin_id,
                 "name": manifest["name"],
                 "version": manifest["version"],
+                "description": manifest["description"],
                 "pages": list(manifest["pages"]),
                 "development_sample": manifest["development_sample"],
             }

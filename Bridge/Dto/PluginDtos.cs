@@ -59,11 +59,8 @@ public record LoadErrorDto
 }
 
 /// <summary>bootstrap / list_plugins 的整体返回。</summary>
-public record BootstrapResultDto
+public record BootstrapResultDto : BridgeResultDto
 {
-    [JsonPropertyName("ok")]
-    public bool Ok { get; init; }
-
     [JsonPropertyName("loaded")]
     public List<PluginInfoDto> Loaded { get; init; } = [];
 

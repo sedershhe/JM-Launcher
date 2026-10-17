@@ -15,7 +15,7 @@ import pytest
 
 import jml_backend
 from jml.core import diagnostics, downloader, jm_source
-from jml.core.errors import ERROR_INVALID_ARGUMENT
+from jml.core.errors import ERROR_BATCH_NOT_FOUND, ERROR_INVALID_ARGUMENT
 from jml.core.protocol import (
     EVENT_DOWNLOAD_BATCH_FINISHED,
     EVENT_DOWNLOAD_ITEM_FINISHED,
@@ -296,6 +296,73 @@ def test_cancel_download_success(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 下载进度入口（get_progress）
+# ---------------------------------------------------------------------------
+
+
+def test_get_progress_registered_batch_returns_same_id(tmp_path):
+    """真登记一个批次后立刻查询：ok=true 且 batch_id 与传入值一致。"""
+    jm_source.set_source(FakeSource())
+    started = json.loads(jml_backend.start_download('["1"]', str(tmp_path)))
+    batch_id = started["batch_id"]
+
+    progress = json.loads(jml_backend.get_progress(batch_id))
+
+    assert progress["ok"] is True
+    assert progress["batch_id"] == batch_id
+    assert progress["status"] in ("running", "finished")
+    assert progress["total"] == 1
+    assert progress["cancel_requested"] is False
+    assert progress["result"] is None or isinstance(progress["result"], dict)
+
+    result = downloader.wait_batch(batch_id, timeout=10)
+    assert result is not None
+    assert result["success"] == 1
+
+
+def test_get_progress_unknown_id_keeps_id_in_error_message():
+    """未知批次必须回传传入 id，证明参数没有在桥接层丢失。"""
+    unknown = "no-such-batch-4f2c9d"
+    data = json.loads(jml_backend.get_progress(unknown))
+
+    assert data["ok"] is False
+    assert data["error_code"] == ERROR_BATCH_NOT_FOUND
+    assert unknown in data["error_message"]
+
+
+def test_get_progress_empty_id_is_invalid_argument():
+    for blank in ("", "   ", None):
+        data = json.loads(jml_backend.get_progress(blank))
+        assert data["ok"] is False
+        assert data["error_code"] == ERROR_INVALID_ARGUMENT
+        assert data["error_message"]
+
+
+def test_bootstrap_and_list_plugins_include_description(
+    make_plugin, base_manifest, tmp_path
+):
+    """loaded[] 必须带 description（内容来自 manifest，空则空串）。"""
+    root = tmp_path / "plugins"
+    make_plugin("demo", base_manifest, root=root)
+
+    boot = json.loads(jml_backend.bootstrap(str(root)))
+    assert boot["loaded"][0]["description"] == "用于单元测试的演示插件"
+
+    listed = json.loads(jml_backend.list_plugins(str(root)))
+    assert listed["loaded"][0]["description"] == "用于单元测试的演示插件"
+
+    # manifest 缺省 description → 空串（不是缺键）
+    manifest_no_description = dict(base_manifest)
+    manifest_no_description.pop("description")
+    manifest_no_description["id"] = "plain_plugin"
+    make_plugin("plain", manifest_no_description, root=root)
+    plain = json.loads(jml_backend.list_plugins(str(root)))
+    by_id = {item["id"]: item for item in plain["loaded"]}
+    assert by_id["demo_plugin"]["description"] == "用于单元测试的演示插件"
+    assert by_id["plain_plugin"]["description"] == ""
+
+
+# ---------------------------------------------------------------------------
 # 搜索 / 详情 / 封面
 # ---------------------------------------------------------------------------
 
@@ -569,6 +636,8 @@ def test_entry_points_never_raise_and_always_json_or_bytes():
         (jml_backend.start_download, (None, None)),
         (jml_backend.start_download, ("[]", None)),
         (jml_backend.cancel_download, (None,)),
+        (jml_backend.get_progress, (None,)),
+        (jml_backend.get_progress, (object(),)),
         (jml_backend.parse_book_ids, (None,)),
     ]
     for function, args in calls:
