@@ -1,19 +1,26 @@
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
 using JML.Navigation;
 using JML.Pages;
 
 namespace JML;
 
 /// <summary>
-/// JM Launcher 主窗口（阶段 1 骨架 + 阶段 2 接线）。
+/// JML 主窗口（PCL2 同款浅色无边框外壳 + 现有导航接线）。
 ///
-/// 启动流程：
-///   1. 先显示 PythonSetupPage（Python 环境检测，后台线程执行）；
-///   2. 检测通过并点击"进入主界面"后，切换到主骨架（默认落在插件页）。
+/// 外壳（2026-10-17 重构，参数见 docs/20261017_PCL2界面视觉规格_v1.0.md A/B 节）：
+///   - WindowStyle=None + AllowsTransparency + Background=null，窗体内容用 Border.Clip 圆角 6；
+///   - 外层 10 + 内层 8 的透明边给 8 块自绘渐变阴影（PCL2 FormMain.xaml:21-88）；
+///   - 8 个阴影矩形同时充当缩放手柄（PCL2 MyResizer 的 8 个命中矩形，不依赖系统边框）；
+///   - 标题栏 48 高纯蓝：左侧文字 logo JML、中间四个胶囊导航、右侧最小化/关闭；
+///     空白处 MouseLeftButtonDown → DragMove()，双击不最大化（PCL2 FormMain.xaml.vb:643）；
+///   - 内页模式：主导航隐藏，改为「← 返回 + 页面名」。
 ///
-/// 导航：
+/// 导航（行为与换壳前完全一致）：
 ///   顶部四个 RadioButton → NavigationStack.Navigate（一级页面）；
-///   插件功能页双击 → PushInner（内页）；顶部「← 返回」→ PopInner。
+///   插件功能页双击 → PushInner（内页）；顶部返回 → PopInner。
 ///   顶部标题栏在主模式/内页模式间的切换由 InnerChanged 事件驱动。
 ///
 /// 阶段 2 接线（本类只做界面调度，不含业务逻辑）：
@@ -35,9 +42,30 @@ public partial class MainWindow : Window
 
     private bool _setupPassed;
 
+    // ---- 自绘缩放状态（PCL2 MyResizer 的等价实现）----
+    private ResizeEdge _resizeEdge = ResizeEdge.None;
+    private Rect _resizeStartRect;
+    private Point _resizeStartMouseDip;
+    private bool _isResizing;
+
+    private enum ResizeEdge
+    {
+        None,
+        Top,
+        Bottom,
+        Left,
+        Right,
+        TopLeft,
+        TopRight,
+        BottomLeft,
+        BottomRight,
+    }
+
     public MainWindow()
     {
         InitializeComponent();
+
+        SizeChanged += (_, _) => UpdateFormClip();
 
         _nav.MainChanged += OnMainChanged;
         _nav.InnerChanged += OnInnerChanged;
@@ -47,8 +75,220 @@ public partial class MainWindow : Window
         _searchPage.DownloadRequested += OnSearchDownloadRequested;
         _searchPage.DetailRequested += OnSearchDetailRequested;
 
-        Loaded += (_, _) => ShowSetup();
+        Loaded += (_, _) =>
+        {
+            UpdateFormClip();
+            ShowSetup();
+        };
     }
+
+    // ------------------------------------------------------------------
+    // 无边框外壳：圆角裁剪 / 拖动 / 缩放 / 最小化 / 关闭
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// 同步 BorderForm 的圆角裁剪矩形（PCL2 FormMain.xaml.vb:638 的 RectForm.Rect 同一做法）。
+    /// </summary>
+    private void UpdateFormClip()
+    {
+        RectForm.Rect = new Rect(0, 0, BorderForm.ActualWidth, BorderForm.ActualHeight);
+    }
+
+    /// <summary>标题栏空白处拖动窗口；双击不最大化（PCL2 FormMain.xaml.vb:623-626）。</summary>
+    private void PanTitle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        // 双击：不处理，避免任何最大化路径（PCL2 本身不支持最大化）。
+        if (e.ClickCount > 1)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        // 只有点在标题栏本体的空白处才拖动，点中导航/按钮时交给控件自己处理。
+        if (!PanTitle.IsMouseDirectlyOver)
+        {
+            return;
+        }
+
+        try
+        {
+            DragMove();
+        }
+        catch (InvalidOperationException)
+        {
+            // 鼠标已在拖动开始前抬起等边界情况：忽略即可，不影响窗口。
+        }
+    }
+
+    private void BtnTitleMin_Click(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void BtnTitleClose_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
+    /// <summary>最大化不支持：被系统手势最大化时立即还原（PCL2 FormMain.xaml.vb:643）。</summary>
+    private void Window_StateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState == WindowState.Maximized)
+        {
+            WindowState = WindowState.Normal;
+        }
+    }
+
+    /// <summary>按下阴影命中区，开始自绘缩放。</summary>
+    private void ResizeHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left
+            || sender is not FrameworkElement handle
+            || handle.Tag is not string tag
+            || !Enum.TryParse(tag, out ResizeEdge edge)
+            || edge == ResizeEdge.None)
+        {
+            return;
+        }
+
+        _resizeEdge = edge;
+        _resizeStartRect = new Rect(Left, Top, ActualWidth, ActualHeight);
+        _resizeStartMouseDip = GetCursorPositionInDip();
+        _isResizing = true;
+
+        if (!handle.CaptureMouse())
+        {
+            // 捕获失败（如鼠标已抬起）就不进入缩放，避免窗口跟着鼠标乱动。
+            _isResizing = false;
+            _resizeEdge = ResizeEdge.None;
+            return;
+        }
+
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// 缩放循环：鼠标捕获在阴影矩形上，事件冒泡到窗口；
+    /// 用屏幕坐标差（换算成 DIP）计算新窗口矩形，避免窗口移动带来的坐标系漂移。
+    /// </summary>
+    private void Window_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isResizing)
+        {
+            return;
+        }
+
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            EndResize();
+            return;
+        }
+
+        Point current = GetCursorPositionInDip();
+        double dx = current.X - _resizeStartMouseDip.X;
+        double dy = current.Y - _resizeStartMouseDip.Y;
+
+        double left = _resizeStartRect.Left;
+        double top = _resizeStartRect.Top;
+        double width = _resizeStartRect.Width;
+        double height = _resizeStartRect.Height;
+
+        if (IsRightEdge(_resizeEdge))
+        {
+            width = Math.Max(MinWidth, _resizeStartRect.Width + dx);
+        }
+
+        if (IsLeftEdge(_resizeEdge))
+        {
+            width = Math.Max(MinWidth, _resizeStartRect.Width - dx);
+            left = _resizeStartRect.Right - width;
+        }
+
+        if (IsBottomEdge(_resizeEdge))
+        {
+            height = Math.Max(MinHeight, _resizeStartRect.Height + dy);
+        }
+
+        if (IsTopEdge(_resizeEdge))
+        {
+            height = Math.Max(MinHeight, _resizeStartRect.Height - dy);
+            top = _resizeStartRect.Bottom - height;
+        }
+
+        Left = left;
+        Top = top;
+        Width = width;
+        Height = height;
+    }
+
+    private void Window_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Left)
+        {
+            EndResize();
+        }
+    }
+
+    private void EndResize()
+    {
+        if (!_isResizing)
+        {
+            return;
+        }
+
+        _isResizing = false;
+        _resizeEdge = ResizeEdge.None;
+
+        if (Mouse.Captured is UIElement captured)
+        {
+            captured.ReleaseMouseCapture();
+        }
+    }
+
+    private static bool IsLeftEdge(ResizeEdge edge) =>
+        edge is ResizeEdge.Left or ResizeEdge.TopLeft or ResizeEdge.BottomLeft;
+
+    private static bool IsRightEdge(ResizeEdge edge) =>
+        edge is ResizeEdge.Right or ResizeEdge.TopRight or ResizeEdge.BottomRight;
+
+    private static bool IsTopEdge(ResizeEdge edge) =>
+        edge is ResizeEdge.Top or ResizeEdge.TopLeft or ResizeEdge.TopRight;
+
+    private static bool IsBottomEdge(ResizeEdge edge) =>
+        edge is ResizeEdge.Bottom or ResizeEdge.BottomLeft or ResizeEdge.BottomRight;
+
+    /// <summary>取鼠标的屏幕坐标并换算成 WPF 的 DIP（与 Window.Left/Top/Width/Height 同一坐标系）。</summary>
+    private Point GetCursorPositionInDip()
+    {
+        if (!GetCursorPos(out NativePoint point))
+        {
+            return new Point(0, 0);
+        }
+
+        Matrix fromDevice = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice
+                            ?? Matrix.Identity;
+        return fromDevice.Transform(new Point(point.X, point.Y));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out NativePoint point);
+
+    // ------------------------------------------------------------------
+    // 页面导航（行为与换壳前一致）
+    // ------------------------------------------------------------------
 
     /// <summary>显示 Python 环境检测页（订阅其完成事件）。</summary>
     private void ShowSetup()
@@ -188,7 +428,8 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 根据导航状态刷新顶部标题栏与内容区。
-    /// 内页时：显示「← 返回 + 页面名」，内容区为插件功能占位页。
+    /// 内页时：隐藏主导航（PCL2 的 PanTitleMain），显示「← 返回 + 页面名」，
+    /// 内容区为插件功能占位页。
     /// </summary>
     private void UpdateContent()
     {

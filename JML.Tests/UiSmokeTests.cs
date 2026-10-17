@@ -2,6 +2,7 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using JML.Bridge.Dto;
 using JML.Pages;
@@ -144,6 +145,33 @@ public class UiSmokeTests
         }
 
         throw new XunitException($"找不到 {typeof(T).Name} 祖先。");
+    }
+
+    /// <summary>读取 Style 的一个直接 Setter 值（外壳参数用，避免把颜色/尺寸硬编码进测试）。</summary>
+    private static T GetStyleSetter<T>(Style style, DependencyProperty property)
+    {
+        foreach (SetterBase setterBase in style.Setters)
+        {
+            if (setterBase is Setter setter && setter.Property == property)
+            {
+                if (setter.Value is T typed)
+                {
+                    return typed;
+                }
+
+                throw new XunitException(
+                    $"样式 Setter {property.Name} 的值类型为 {setter.Value?.GetType().Name ?? "null"}，期望 {typeof(T).Name}。");
+            }
+        }
+
+        throw new XunitException($"样式里找不到 Setter：{property.Name}。");
+    }
+
+    /// <summary>按主题资源取颜色，作为“不许硬编码色值”的对照基准。</summary>
+    private static Color ResourceColor(string key)
+    {
+        var brush = Assert.IsType<SolidColorBrush>(Application.Current.FindResource(key));
+        return brush.Color;
     }
 
     [Fact]
@@ -419,6 +447,202 @@ public class UiSmokeTests
         Assert.Equal("-", PageText.BuildPageCountText(unknown.PageCount));
         Assert.Equal("-", PageText.BuildPageCountText(-1));
         Assert.Equal("42", PageText.BuildPageCountText(known.PageCount));
+    }
+
+    /// <summary>
+    /// 主题切换（PCL2 只有浅色）：ThemeHelper 必须真的把 ColorsDark 排到 Colors 之前，
+    /// 让 ColorBrush4 解析为 PCL2 标题栏蓝 #4890F5。这是“切浅色”这条决定的直接断言。
+    /// </summary>
+    [Fact]
+    public void ThemeHelper_SwitchesToPclLightPalette()
+    {
+        RunOnUiThread(() =>
+        {
+            // 直接跑生产路径（App.ApplyPclLightTheme）：它修正了库自带 Initialize
+            // 在 BAML 相对 Source 下识别不到调色板的问题。
+            JML.App.ApplyPclLightTheme(Application.Current.Resources);
+
+            var titleBlue = Assert.IsType<SolidColorBrush>(Application.Current.FindResource("ColorBrush4"));
+            Assert.Equal(Color.FromRgb(0x48, 0x90, 0xF5), titleBlue.Color);
+
+            var white = Assert.IsType<SolidColorBrush>(Application.Current.FindResource("ColorBrushWhite"));
+            Assert.Equal(Colors.White, white.Color);
+        });
+    }
+
+    /// <summary>
+    /// 换壳回归（PCL2 规格 A1/A2）：主窗口必须是无边框透明窗，默认 900×550 / 最小 810×470，
+    /// 透明外边 10+8、圆角 6、标题栏 48 高且用主题 ColorBrush4 纯色，
+    /// 主模式/内页模式两套标题栏与 28×28 最小化/关闭按钮都在。
+    /// </summary>
+    [Fact]
+    public void MainWindow_Shell_UsesPclFramelessParameters()
+    {
+        RunOnUiThread(() =>
+        {
+            var window = new MainWindow();
+            try
+            {
+                // A1 窗口参数
+                Assert.Equal(WindowStyle.None, window.WindowStyle);
+                Assert.True(window.AllowsTransparency, "无边框外壳必须开启 AllowsTransparency。");
+                Assert.Null(window.Background);
+                Assert.Equal(900, window.Width);
+                Assert.Equal(550, window.Height);
+                Assert.Equal(810, window.MinWidth);
+                Assert.Equal(470, window.MinHeight);
+                Assert.Equal(WindowStartupLocation.CenterScreen, window.WindowStartupLocation);
+                Assert.Equal(ResizeMode.CanResize, window.ResizeMode);
+
+                // 透明外边：外层 10（阴影区）+ 内层 8
+                var panBack = Find<Grid>(window, "PanBack");
+                Assert.Equal(new Thickness(10), panBack.Margin);
+                var borderForm = Find<Border>(window, "BorderForm");
+                Assert.Equal(new Thickness(8), borderForm.Margin);
+
+                // 圆角 6（Clip 的 RectangleGeometry）
+                Assert.Equal(new CornerRadius(6), borderForm.CornerRadius);
+                var clip = Assert.IsType<RectangleGeometry>(borderForm.Clip);
+                Assert.Equal(6, clip.RadiusX);
+                Assert.Equal(6, clip.RadiusY);
+
+                // 标题栏：48 高、纯色 ColorBrush4（不是渐变）
+                var titleBar = Find<Grid>(window, "PanTitle");
+                Assert.Equal(48, titleBar.Height);
+                var titleBrush = Assert.IsType<SolidColorBrush>(titleBar.Background);
+                Assert.Equal(ResourceColor("ColorBrush4"), titleBrush.Color);
+
+                // 主模式 / 内页模式两套标题栏
+                Assert.Equal(Visibility.Visible, Find<Grid>(window, "MainHeader").Visibility);
+                Assert.Equal(Visibility.Collapsed, Find<Grid>(window, "InnerHeader").Visibility);
+                Assert.IsType<Button>(window.FindName("BtnTitleMin"));
+                Assert.IsType<Button>(window.FindName("BtnTitleClose"));
+                Assert.IsType<Button>(window.FindName("BtnBack"));
+
+                // 内页标题 15px（PCL2 FormMain.xaml:136）
+                var innerTitle = Find<TextBlock>(window, "TextInnerTitle");
+                Assert.Equal(15, innerTitle.FontSize);
+
+                // A4 顶部四个胶囊导航：27 高、间距 5、内边距 2,0、带矢量图标
+                foreach (string name in new[] { "NavDownload", "NavSearch", "NavPlugin", "NavSettings" })
+                {
+                    var nav = Find<RadioButton>(window, name);
+                    Assert.Equal(27, nav.Height);
+                    Assert.Equal(new Thickness(5, 0, 5, 0), nav.Margin);
+                    Assert.Equal(new Thickness(2, 0, 2, 0), nav.Padding);
+                    Assert.Same(Application.Current.FindResource("NavRadioButton"), nav.Style);
+
+                    var content = Assert.IsType<StackPanel>(nav.Content);
+                    Assert.Single(content.Children.OfType<Path>());
+                    Assert.Single(content.Children.OfType<TextBlock>());
+                }
+
+                // 内容区仍在（换壳不能白屏）
+                Assert.IsType<ContentControl>(window.FindName("MainContent"));
+
+                // 页面底色资源存在且是渐变（PCL2 UiBackgroundColorful）
+                var pageBackground = Assert.IsType<LinearGradientBrush>(
+                    Application.Current.FindResource("JmlPageBackground"));
+                Assert.Equal(3, pageBackground.GradientStops.Count);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+
+    /// <summary>
+    /// 换壳回归（PCL2 规格 A4）：导航胶囊模板 = 27 高、圆角 13.5、
+    /// 选中态纯白底 + ColorBrush3 字色（无下划线）。
+    /// </summary>
+    [Fact]
+    public void NavRadioButton_Template_IsPclCapsule()
+    {
+        RunOnUiThread(() =>
+        {
+            var nav = new RadioButton
+            {
+                Style = (Style)Application.Current.FindResource("NavRadioButton"),
+                Content = "下载",
+            };
+
+            nav.Measure(new Size(200, 48));
+            nav.Arrange(new Rect(0, 0, 200, 48));
+            nav.UpdateLayout();
+
+            Assert.Equal(27, nav.ActualHeight);
+            var root = Assert.IsType<Border>(nav.Template.FindName("Root", nav));
+            Assert.Equal(13.5, root.CornerRadius.TopLeft);
+            Assert.Equal(13.5, root.CornerRadius.BottomRight);
+
+            nav.IsChecked = true;
+            nav.UpdateLayout();
+
+            var rootBrush = Assert.IsType<SolidColorBrush>(root.Background);
+            Assert.Equal(ResourceColor("ColorBrushWhite"), rootBrush.Color);
+
+            var foreground = Assert.IsType<SolidColorBrush>(nav.Foreground);
+            Assert.Equal(ResourceColor("ColorBrush3"), foreground.Color);
+        });
+    }
+
+    /// <summary>
+    /// 换壳回归（PCL2 规格 B）：左侧栏列表项行高 36、选中竖条 5 ×（行高−12）、圆角 2、
+    /// 颜色 ColorBrush3；选中文字 14px 且变 ColorBrush3。
+    /// </summary>
+    [Fact]
+    public void SideListItem_Template_UsesPclSelectionBar()
+    {
+        RunOnUiThread(() =>
+        {
+            var item = new RadioButton
+            {
+                Style = (Style)Application.Current.FindResource("SideListItem"),
+                Content = "插件管理",
+                IsChecked = true,
+            };
+
+            item.Measure(new Size(160, 36));
+            item.Arrange(new Rect(0, 0, 160, 36));
+            item.UpdateLayout();
+
+            Assert.Equal(36, item.ActualHeight);
+            Assert.Equal(14, item.FontSize);
+
+            var bar = Assert.IsType<Rectangle>(item.Template.FindName("SelectionBar", item));
+            Assert.Equal(5, bar.Width);
+            Assert.Equal(2, bar.RadiusX);
+            Assert.Equal(2, bar.RadiusY);
+            Assert.Equal(Visibility.Visible, bar.Visibility);
+            Assert.Equal(24, bar.ActualHeight); // 36 - 12
+            Assert.Equal(ResourceColor("ColorBrush3"), Assert.IsType<SolidColorBrush>(bar.Fill).Color);
+
+            var foreground = Assert.IsType<SolidColorBrush>(item.Foreground);
+            Assert.Equal(ResourceColor("ColorBrush3"), foreground.Color);
+
+            // 未选中时竖条隐藏（选中态只靠白胶囊/竖条表达，不保留下划线之类）
+            item.IsChecked = false;
+            item.UpdateLayout();
+            Assert.Equal(Visibility.Collapsed, bar.Visibility);
+        });
+    }
+
+    /// <summary>
+    /// 换壳回归（PCL2 规格 B 分组标题）：FontSize=12、Opacity=0.6、Margin=13,20,5,4。
+    /// </summary>
+    [Fact]
+    public void SideGroupTitle_Style_MatchesPcl()
+    {
+        RunOnUiThread(() =>
+        {
+            var style = (Style)Application.Current.FindResource("SideGroupTitle");
+            Assert.Equal(12, GetStyleSetter<double>(style, TextBlock.FontSizeProperty));
+            Assert.Equal(0.6, GetStyleSetter<double>(style, UIElement.OpacityProperty));
+            Assert.Equal(
+                new Thickness(13, 20, 5, 4),
+                GetStyleSetter<Thickness>(style, FrameworkElement.MarginProperty));
+        });
     }
 }
 

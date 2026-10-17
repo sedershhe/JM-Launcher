@@ -16,10 +16,9 @@ public partial class App : Application
         base.OnStartup(e);
 
         // 初始化 PCL2 风格主题支持（必须在 UI 线程、在窗口创建前调用）
-        ThemeHelper.Initialize(Resources);
-
-        // PCL2 主色调为深色风格：false = 深色，true = 浅色
-        ThemeHelper.SetTheme(false);
+        // PCL2 只有浅色一套观感（ModSecret.vb 无暗色色板）：切浅色，
+        // 外壳（标题栏/导航/左栏）与页面统一使用 PCL2 默认主题色。
+        ApplyPclLightTheme(Resources);
 
         // 桥接启动装配：目录 → PythonRuntime → set_log_dir → EventRelay。
         // 不在这里 bootstrap 插件（保持阶段 1 的插件页时机）。
@@ -35,6 +34,66 @@ public partial class App : Application
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
+    }
+
+    /// <summary>
+    /// 切到 PCL2 浅色主题。
+    ///
+    /// 为什么不用 <c>ThemeHelper.Initialize(appResources)</c>：
+    /// 该库只按 <c>Source</c> 字符串里的 "/Colors.xaml" 识别调色板；当 Generic.xaml 由 BAML
+    /// 载入时，其内部合并字典的 Source 是相对串 <c>"Colors.xaml"</c>（不含斜杠），
+    /// 识别失败后 <c>SetTheme</c> 会静默返回，界面停在 ColorsDark 上。
+    /// 这里自己定位 Generic.xaml 及其内部的 Colors / ColorsDark 字典，改走库提供的
+    /// 显式重载（不修改外部 UI 库）。
+    /// </summary>
+    /// <param name="appResources">Application.Resources（顶层合并了 Generic.xaml）。</param>
+    public static void ApplyPclLightTheme(ResourceDictionary appResources)
+    {
+        ResourceDictionary? generic = null;
+        foreach (var dict in appResources.MergedDictionaries)
+        {
+            if (SourceContains(dict, "Generic.xaml"))
+            {
+                generic = dict;
+                break;
+            }
+        }
+
+        ResourceDictionary? light = null;
+        ResourceDictionary? dark = null;
+        if (generic is not null)
+        {
+            foreach (var dict in generic.MergedDictionaries)
+            {
+                string source = dict.Source?.OriginalString ?? string.Empty;
+                if (source.EndsWith("ColorsDark.xaml", StringComparison.OrdinalIgnoreCase))
+                {
+                    dark = dict;
+                }
+                else if (source.EndsWith("Colors.xaml", StringComparison.OrdinalIgnoreCase))
+                {
+                    light = dict;
+                }
+            }
+        }
+
+        if (generic is not null && light is not null && dark is not null)
+        {
+            ThemeHelper.Initialize(generic, light, dark);
+        }
+        else
+        {
+            // 兜底：沿用库自带识别（将来资源结构变化时不硬失败）。
+            ThemeHelper.Initialize(appResources);
+        }
+
+        ThemeHelper.SetTheme(true);
+    }
+
+    private static bool SourceContains(ResourceDictionary dict, string fileName)
+    {
+        string source = dict.Source?.OriginalString ?? string.Empty;
+        return source.IndexOf(fileName, StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     protected override void OnExit(ExitEventArgs e)
