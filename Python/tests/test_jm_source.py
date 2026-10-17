@@ -11,10 +11,17 @@ import logging
 import os
 from types import SimpleNamespace
 
+import jmcomic
 import pytest
 from PIL import Image
 
 from jml.core import jm_source
+from jml.core.errors import (
+    ERROR_JM,
+    ERROR_NETWORK,
+    InvalidCredentialsError,
+    classify,
+)
 from jml.core.protocol import EVENT_DOWNLOAD_LOG
 from jml.host import events
 
@@ -300,6 +307,153 @@ def test_exception_rules_cover_jmcomic_types():
 def test_jmcomic_version_probe():
     version = jm_source.jmcomic_version()
     assert version and isinstance(version, str)
+
+
+# ---------------------------------------------------------------------------
+# 登录（jmcomic 2.7.1：JmApiClient.login，离线假客户端）
+# ---------------------------------------------------------------------------
+
+
+class FakeLoginClient:
+    """只实现登录相关行为的假客户端（绝不联网）。"""
+
+    def __init__(self, error: BaseException | None = None, result=True) -> None:
+        self.error = error
+        self.result = result
+        self.meta: dict = {}
+        self.login_calls: list[tuple[str, str]] = []
+        self._username = None
+
+    def __setitem__(self, key, value):
+        self.meta[key] = value
+
+    def get_meta_data(self, key=None, dv=None):
+        if key is None:
+            return self.meta
+        return self.meta.get(key, dv)
+
+    def login(self, username, password):
+        self.login_calls.append((username, password))
+        if self.error is not None:
+            raise self.error
+        if self.result is False:
+            return False
+        self.meta["cookies"] = {"AVS": "LOGGED-IN-SESSION"}
+        return SimpleNamespace(is_success=True)
+
+
+def test_source_login_sets_logged_in_without_building_option():
+    source = jm_source.JmcomicSource()
+    client = FakeLoginClient()
+    source._client = client  # 注入假客户端：不建 JmOption、不联网
+
+    assert source.login("user_1", "PWD-123456") is True
+
+    assert client.login_calls == [("user_1", "PWD-123456")]
+    assert source.is_logged_in() is True
+    assert source._option is None, "登录不得构造/写 JmOption 配置"
+
+
+def test_source_login_anonymous_avs_is_not_login_proof():
+    """匿名会话也有 AVS cookie，不能据此判定已登录。"""
+    source = jm_source.JmcomicSource()
+    client = FakeLoginClient()
+    client.meta["cookies"] = {"AVS": "ANONYMOUS-AVS"}
+    source._client = client
+
+    assert source.is_logged_in() is False
+
+
+def test_source_login_html_username_is_login_signal():
+    source = jm_source.JmcomicSource()
+    client = FakeLoginClient()
+    client._username = "html_user"
+    source._client = client
+
+    assert source.is_logged_in() is True
+
+
+def test_source_login_invalid_credentials_by_exception_type():
+    error = jmcomic.ResponseUnexpectedException(
+        "密码错误 password=LEAKED-PASSWORD",
+        {"resp": SimpleNamespace(http_code=200)},
+    )
+    source = jm_source.JmcomicSource()
+    source._client = FakeLoginClient(error=error)
+
+    with pytest.raises(InvalidCredentialsError) as caught:
+        source.login("user_1", "LEAKED-PASSWORD")
+
+    assert "LEAKED-PASSWORD" not in str(caught.value)
+    assert classify(caught.value).error_code == "INVALID_CREDENTIALS"
+
+
+def test_source_login_http_5xx_is_jm_error_not_credentials():
+    error = jmcomic.ResponseUnexpectedException(
+        "server error",
+        {"resp": SimpleNamespace(http_code=503)},
+    )
+    source = jm_source.JmcomicSource()
+    source._client = FakeLoginClient(error=error)
+
+    with pytest.raises(jmcomic.JmcomicException) as caught:
+        source.login("user_1", "PWD-123456")
+
+    assert not isinstance(caught.value, InvalidCredentialsError)
+    assert classify(caught.value).error_code == ERROR_JM
+
+
+def test_source_login_network_error_stays_network():
+    error = jmcomic.RequestRetryAllFailException("全部域名失败", {})
+    source = jm_source.JmcomicSource()
+    source._client = FakeLoginClient(error=error)
+
+    with pytest.raises(jmcomic.RequestRetryAllFailException):
+        source.login("user_1", "PWD-123456")
+
+
+def test_source_login_false_is_invalid_credentials():
+    source = jm_source.JmcomicSource()
+    source._client = FakeLoginClient(result=False)
+
+    with pytest.raises(InvalidCredentialsError):
+        source.login("user_1", "PWD-123456")
+
+
+def test_source_logout_clears_in_memory_cookies():
+    source = jm_source.JmcomicSource()
+    client = FakeLoginClient()
+    source._client = client
+    source.login("user_1", "PWD-123456")
+    assert source.is_logged_in() is True
+
+    source.logout()
+
+    assert source.is_logged_in() is False
+    assert client.meta["cookies"] == {}
+    assert client._username is None
+
+
+def test_source_failed_relogin_clears_logged_in_flag():
+    source = jm_source.JmcomicSource()
+    client = FakeLoginClient()
+    source._client = client
+    source.login("user_1", "PWD-123456")
+    assert source.is_logged_in() is True
+
+    client.error = InvalidCredentialsError("账号或密码不正确")
+    with pytest.raises(InvalidCredentialsError):
+        source.login("user_1", "WRONG")
+
+    assert source.is_logged_in() is False
+
+
+def test_network_error_classification_for_login():
+    """``RequestRetryAllFailException`` 仍按类型归为 NETWORK_ERROR。"""
+    assert (
+        classify(jmcomic.RequestRetryAllFailException("x", {})).error_code
+        == ERROR_NETWORK
+    )
 
 
 def test_jmcomic_logger_capture_masks_and_emits_event():

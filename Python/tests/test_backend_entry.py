@@ -15,7 +15,14 @@ import pytest
 
 import jml_backend
 from jml.core import diagnostics, downloader, jm_source
-from jml.core.errors import ERROR_BATCH_NOT_FOUND, ERROR_INVALID_ARGUMENT
+from jml.core.errors import (
+    ERROR_BATCH_NOT_FOUND,
+    ERROR_INVALID_ARGUMENT,
+    ERROR_INVALID_CREDENTIALS,
+    ERROR_NETWORK,
+    ERROR_NOT_LOGGED_IN,
+    InvalidCredentialsError,
+)
 from jml.core.protocol import (
     EVENT_DOWNLOAD_BATCH_FINISHED,
     EVENT_DOWNLOAD_ITEM_FINISHED,
@@ -497,6 +504,145 @@ def test_fetch_cover_returns_none_on_failure():
 
 
 # ---------------------------------------------------------------------------
+# 账号入口（阶段 3）
+# ---------------------------------------------------------------------------
+
+
+def test_account_entries_json_and_masked_username():
+    """账号入口返回 JSON 字符串，用户名打码，任何返回都不含明文密码。"""
+    jm_source.set_source(FakeSource())
+    password = "BACKEND-SECRET-7f"
+
+    raw = jml_backend.account_set_credentials("backend_user", password)
+    assert isinstance(raw, str)
+    data = json.loads(raw)
+    assert data["ok"] is True
+    assert data["logged_in"] is False
+    assert data["username_masked"] == "ba***er"
+    assert password not in raw
+
+    status = json.loads(jml_backend.account_status())
+    assert status["ok"] is True
+    assert status["logged_in"] is False
+    assert status["username_masked"] == "ba***er"
+    assert password not in json.dumps(status, ensure_ascii=False)
+
+    logged = json.loads(jml_backend.account_login())
+    assert logged["ok"] is True
+    assert logged["logged_in"] is True
+    assert logged["username_masked"] == "ba***er"
+    assert password not in json.dumps(logged, ensure_ascii=False)
+
+    logged_out = json.loads(jml_backend.account_logout())
+    assert logged_out["ok"] is True
+    assert logged_out["logged_in"] is False
+    assert logged_out["credentials_kept"] is True
+
+    cleared = json.loads(jml_backend.account_clear())
+    assert cleared["ok"] is True
+    assert cleared["credentials_cleared"] is True
+    assert json.loads(jml_backend.account_status())["username_masked"] == ""
+
+
+def test_account_set_credentials_rejects_empty_values():
+    for username, password in (
+        ("", "x"),
+        (" ", "x"),
+        ("user", ""),
+        (None, "x"),
+        ("user", None),
+        (object(), "x"),
+        ("user", object()),
+    ):
+        data = json.loads(jml_backend.account_set_credentials(username, password))
+        assert data["ok"] is False
+        assert data["error_code"] == ERROR_INVALID_ARGUMENT
+        assert data["error_message"]
+
+
+def test_account_login_without_credentials_is_not_logged_in():
+    jm_source.set_source(FakeSource())
+    for call in (jml_backend.account_login, jml_backend.account_status):
+        raw = call()
+        assert isinstance(raw, str)
+    data = json.loads(jml_backend.account_login())
+    assert data["ok"] is False
+    assert data["error_code"] == ERROR_NOT_LOGGED_IN
+
+
+def test_account_login_failure_is_classified_and_sanitized():
+    password = "WRONG-SECRET-55"
+    jm_source.set_source(
+        FakeSource(login_error=InvalidCredentialsError(f"密码错误 {password}"))
+    )
+    jml_backend.account_set_credentials("wrong_user", password)
+
+    raw = jml_backend.account_login()
+    data = json.loads(raw)
+
+    assert data["ok"] is False
+    assert data["logged_in"] is False
+    assert data["error_code"] == ERROR_INVALID_CREDENTIALS
+    assert password not in raw
+    assert "***" in data["error_message"]
+
+    records = json.loads(jml_backend.get_diagnostics(50))["records"]
+    assert records
+    assert all(password not in item for item in records)
+    assert any("***" in item for item in records)
+
+
+def test_account_login_network_failure_is_classified():
+    password = "NET-SECRET-31"
+    jm_source.set_source(
+        FakeSource(login_error=ConnectionError(f"连接失败 {password}"))
+    )
+    jml_backend.account_set_credentials("net_user", password)
+
+    data = json.loads(jml_backend.account_login())
+
+    assert data["ok"] is False
+    assert data["error_code"] == ERROR_NETWORK
+    assert password not in json.dumps(data, ensure_ascii=False)
+
+
+def test_account_login_with_does_not_keep_credentials():
+    """一次性登录只保留会话，不把凭据写进长期内存。"""
+    source = FakeSource()
+    jm_source.set_source(source)
+    password = "ONE-SHOT-SECRET-12"
+
+    data = json.loads(jml_backend.account_login_with("once_user", password))
+    assert data["ok"] is True
+    assert data["logged_in"] is True
+    assert data["username_masked"] == "on***er"
+    assert password not in json.dumps(data, ensure_ascii=False)
+
+    logged_out = json.loads(jml_backend.account_logout())
+    assert logged_out["ok"] is True
+    assert logged_out["credentials_kept"] is False
+
+    # 一次性凭据没有留在内存里 → 不能再 ensure/login。
+    again = json.loads(jml_backend.account_login())
+    assert again["ok"] is False
+    assert again["error_code"] == ERROR_NOT_LOGGED_IN
+
+
+def test_account_credentials_not_written_to_disk(tmp_path, monkeypatch):
+    """凭据只进内存：工作目录里不得出现任何文件。"""
+    monkeypatch.chdir(tmp_path)
+    jm_source.set_source(FakeSource())
+    password = "DISK-SECRET-88"
+
+    jml_backend.account_set_credentials("disk_user", password)
+    jml_backend.account_login()
+    jml_backend.account_status()
+
+    assert list(tmp_path.iterdir()) == []
+    assert password not in jml_backend.get_diagnostics(50)
+
+
+# ---------------------------------------------------------------------------
 # 事件 sink
 # ---------------------------------------------------------------------------
 
@@ -639,6 +785,14 @@ def test_entry_points_never_raise_and_always_json_or_bytes():
         (jml_backend.get_progress, (None,)),
         (jml_backend.get_progress, (object(),)),
         (jml_backend.parse_book_ids, (None,)),
+        (jml_backend.account_set_credentials, (None, None)),
+        (jml_backend.account_set_credentials, (object(), object())),
+        (jml_backend.account_login, ()),
+        (jml_backend.account_login_with, (None, None)),
+        (jml_backend.account_login_with, (object(), object())),
+        (jml_backend.account_logout, ()),
+        (jml_backend.account_status, ()),
+        (jml_backend.account_clear, ()),
     ]
     for function, args in calls:
         result = function(*args)

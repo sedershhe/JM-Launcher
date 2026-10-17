@@ -26,7 +26,8 @@ def test_core_downloader_import_does_not_pull_host_modules():
         "'jml.host.loader' in sys.modules, "
         "'jml.host.config' in sys.modules, "
         "'jml.host.manifest' in sys.modules, "
-        "'PIL' in sys.modules)"
+        "'PIL' in sys.modules, "
+        "'jmcomic' in sys.modules)"
     )
     env = dict(os.environ)
     env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
@@ -35,7 +36,7 @@ def test_core_downloader_import_does_not_pull_host_modules():
         [sys.executable, "-c", code], cwd=root, env=env
     ).decode("utf-8").strip()
 
-    assert output == "False False False False False"
+    assert output == "False False False False False False"
 
 
 def test_host_events_is_compat_reexport_and_tracks_reset():

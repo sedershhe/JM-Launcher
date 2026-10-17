@@ -44,6 +44,8 @@ ERROR_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 ERROR_NOT_AVAILABLE = "NOT_AVAILABLE"
 ERROR_CANCELLED = "CANCELLED"
 ERROR_BATCH_NOT_FOUND = "BATCH_NOT_FOUND"
+ERROR_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
+ERROR_NOT_LOGGED_IN = "NOT_LOGGED_IN"
 ERROR_UNKNOWN = "UNKNOWN_ERROR"
 
 #: 错误码 → 中文基础文案（界面展示用；详细原因另附在冒号之后）
@@ -67,6 +69,8 @@ ERROR_MESSAGES: dict[str, str] = {
     ERROR_NOT_AVAILABLE: "功能当前不可用",
     ERROR_CANCELLED: "已取消",
     ERROR_BATCH_NOT_FOUND: "找不到该下载批次",
+    ERROR_INVALID_CREDENTIALS: "账号或密码不正确",
+    ERROR_NOT_LOGGED_IN: "尚未登录",
     ERROR_UNKNOWN: "未知错误",
 }
 
@@ -127,6 +131,18 @@ class BatchNotFoundError(AppError):
     """找不到下载批次。"""
 
     error_code = ERROR_BATCH_NOT_FOUND
+
+
+class InvalidCredentialsError(AppError):
+    """账号或密码不正确（由数据源按**异常类型**给出，不靠文案判断）。"""
+
+    error_code = ERROR_INVALID_CREDENTIALS
+
+
+class NotLoggedInError(AppError):
+    """尚未登录，且内存中没有可用于自动登录的凭据。"""
+
+    error_code = ERROR_NOT_LOGGED_IN
 
 
 # ---------------------------------------------------------------------------

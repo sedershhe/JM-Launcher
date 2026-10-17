@@ -1,8 +1,8 @@
 <!--
-    设置页（阶段 1：仅界面框架；2026-10-17 页面层 PCL2 化只改外观）
-    分区：账号设置（阶段 3）、下载路径（阶段 3）、插件设置（占位）。
-    所有控件在阶段 1 不接业务事件。
-    布局修复：外层 ScrollViewer 必须禁用横向滚动，否则纵向 StackPanel 在
+    设置页（阶段 3：账号 + 下载路径接线）
+    分区：账号设置、下载路径、插件设置（阶段 4）。
+    安全：账号凭据不进本页配置；本页只显示打码用户名与固定提示。
+    布局修复保留：外层 ScrollViewer 必须禁用横向滚动，否则纵向 StackPanel 在
     无限宽测量下让 * 列塌成内容宽（实测 InputDownloadDir 只有 6×36）；
     卡片内容由 JmlCard 模板统一 Stretch，不再依赖 PlainCard 的 ContentPresenter 默认 Left。
 -->
@@ -15,42 +15,56 @@
                   HorizontalContentAlignment="Stretch">
         <StackPanel Margin="25">
 
-            <!-- 账号设置（阶段 3 实现；账号凭据走安全存储，不入配置文件） -->
+            <!-- 账号设置：只显示状态与入口，真实录入在模态 AccountDialog -->
             <ctl:JmlCard x:Name="CardAccount" Header="账号设置" HorizontalAlignment="Stretch">
                 <StackPanel>
-                    <TextBlock Text="账号登录与凭据管理将在阶段 3 实现（凭据走安全存储，不写入配置文件）。"
-                               Margin="0,0,0,10"
+                    <TextBlock x:Name="TextAccountStatus"
+                               Text="未登录"
+                               FontSize="15"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource ColorBrush1}" />
+                    <TextBlock Margin="0,6,0,10"
+                               Text="账号凭据保存在 Windows 凭据管理器；不可用时回退到 DPAPI 加密文件，不会写入 settings.json 或日志。"
+                               TextWrapping="Wrap"
                                Foreground="{DynamicResource ColorBrushGray3}" />
-                    <Button x:Name="BtnAccount" Content="登录 / 管理账号" IsEnabled="False"
+                    <Button x:Name="BtnAccount"
+                            Content="登录 / 管理账号"
                             Style="{StaticResource SecondaryButton}"
-                            HorizontalAlignment="Left" />
+                            HorizontalAlignment="Left"
+                            Click="BtnAccount_Click" />
                 </StackPanel>
             </ctl:JmlCard>
 
-            <!-- 下载路径（阶段 3 接入保存逻辑） -->
+            <!-- 下载路径：选择后持久化到 AppSettings（只存路径） -->
             <ctl:JmlCard x:Name="CardPath" Header="下载路径" Margin="0,12,0,0" HorizontalAlignment="Stretch">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBox x:Name="InputDownloadDir"
-                             Style="{StaticResource JmlInputBox}"
-                             MinHeight="32"
-                             IsReadOnly="True" />
-                    <Button x:Name="BtnBrowseDir" Grid.Column="1" Content="浏览…"
-                            Margin="8,0,0,0" IsEnabled="False"
-                            Style="{StaticResource SecondaryButton}" />
-                </Grid>
+                <StackPanel>
+                    <TextBlock Text="记住上次选择的目录；下载页默认使用该目录，目录不存在时回退桌面。"
+                               Margin="0,0,0,10"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource ColorBrushGray3}" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="InputDownloadDir"
+                                 Style="{StaticResource JmlInputBox}"
+                                 MinHeight="32"
+                                 IsReadOnly="True" />
+                        <Button x:Name="BtnBrowseDir" Grid.Column="1" Content="浏览…"
+                                Margin="8,0,0,0"
+                                Style="{StaticResource SecondaryButton}"
+                                Click="BtnBrowseDir_Click" />
+                    </Grid>
+                </StackPanel>
             </ctl:JmlCard>
 
-            <!-- 插件设置（占位：插件提供的设置项在阶段 4 动态生成） -->
+            <!-- 插件设置：阶段 4 由插件注册 -->
             <ctl:JmlCard x:Name="CardPlugin" Header="插件设置" Margin="0,12,0,0" HorizontalAlignment="Stretch">
-                <StackPanel>
-                    <TextBlock Text="已加载插件提供的设置项将在此动态展示（阶段 4 实现）。"
-                               Margin="0,0,0,0"
-                               Foreground="{DynamicResource ColorBrushGray3}" />
-                </StackPanel>
+                <TextBlock Text="插件可在阶段 4 注册设置项。"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ColorBrushGray3}" />
             </ctl:JmlCard>
 
         </StackPanel>

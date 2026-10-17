@@ -6,14 +6,14 @@ namespace JML.Infrastructure;
 /// <summary>
 /// 应用设置（%APPDATA%/JML/settings.json）。
 /// 读写失败一律回退默认值，绝不让设置文件问题弄崩主程序。
-/// 注意：本文件不存任何凭据（账号走凭据管理器/DPAPI，阶段 3 实现）。
+/// 注意：本文件不存任何凭据（账号走 CredentialStore：Windows 凭据管理器 / DPAPI）。
 /// </summary>
 public sealed class AppSettings
 {
     /// <summary>禁用的插件 id 列表</summary>
     public List<string> DisabledPlugins { get; set; } = [];
 
-    /// <summary>上次选择的下载目录（阶段 3 使用，先占位）</summary>
+    /// <summary>上次选择的下载目录（阶段 3 接入；只存路径，绝不存凭据）</summary>
     public string DownloadDir { get; set; } = "";
 
     private static readonly object Gate = new();
@@ -31,6 +31,20 @@ public sealed class AppSettings
     {
         WriteIndented = true,
     };
+
+    /// <summary>
+    /// 解析实际可用的下载目录：配置目录存在就用它，否则回退桌面。
+    /// 下载页只做这一处路径选择，避免 C# 侧各自拼装默认路径。
+    /// </summary>
+    public static string ResolveDownloadDirectory(string? configured)
+    {
+        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))
+        {
+            return configured;
+        }
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+    }
 
     /// <summary>从磁盘加载；文件不存在或损坏时返回全默认值。</summary>
     public static AppSettings Load()

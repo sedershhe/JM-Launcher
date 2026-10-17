@@ -1,6 +1,6 @@
 """主程序服务路由单元测试（jm.search / jm.detail / jm.download / jm.account）。
 
-验证：统一 call_service 签名、成功/失败形态、关键词快照、账号占位不抛异常、
+验证：统一 call_service 签名、成功/失败形态、关键词快照、账号登录态真实化、
 服务不存在/方法不存在抛 ServiceError。零联网（假数据源）。
 """
 
@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from jml.core import downloader, jm_source
+from jml.core import account, downloader, jm_source
 from jml.core.errors import (
     ERROR_BATCH_NOT_FOUND,
     ERROR_INVALID_ARGUMENT,
-    ERROR_NOT_AVAILABLE,
+    ERROR_NOT_LOGGED_IN,
 )
 from jml.core.protocol import ServiceError
 from jml.services.host_services import (
@@ -127,15 +127,71 @@ def test_download_service_rejects_non_digit_ids(fake_source, tmp_path, bad_ids):
     assert result["error_code"] == ERROR_INVALID_ARGUMENT
 
 
-@pytest.mark.parametrize("method", ["login_status", "ensure_login"])
-def test_account_service_returns_not_available_without_raising(fake_source, method):
-    """账号占位必须返回结构化失败，绝不抛 NotImplementedError。"""
+@pytest.mark.parametrize("method", ["login_status", "ensure_login", "login", "logout"])
+def test_account_service_methods_return_structured_dicts(fake_source, method):
+    """账号服务不再返回 NOT_AVAILABLE，也不抛业务异常。"""
     result = call_service("jm.account", 1, method, {})
-    assert result == {
-        "ok": False,
-        "error_code": ERROR_NOT_AVAILABLE,
-        "error_message": "账号功能阶段3实现",
-    }
+    assert isinstance(result, dict)
+    assert "ok" in result
+    assert "logged_in" in result
+    assert "username_masked" in result
+    if not result["ok"]:
+        assert result["error_code"]
+
+
+def test_account_service_login_lifecycle(fake_source):
+    """设置内存凭据 → 服务登录 → 查状态 → 登出；凭据不出现在返回里。"""
+    password = "SERVICE-SECRET-9x"
+    account.set_credentials("service_user", password)
+
+    status = call_service("jm.account", 1, "login_status", {})
+    assert status["logged_in"] is False
+    assert status["username_masked"] == "se***er"
+
+    logged_in = call_service("jm.account", 1, "login", {})
+    assert logged_in["ok"] is True
+    assert logged_in["logged_in"] is True
+    assert logged_in["username_masked"] == "se***er"
+    assert password not in str(logged_in)
+
+    ensured = call_service("jm.account", 1, "ensure_login", {})
+    assert ensured["logged_in"] is True
+    assert len(fake_source.login_calls) == 1
+
+    logged_out = call_service("jm.account", 1, "logout", {})
+    assert logged_out["ok"] is True
+    assert logged_out["logged_in"] is False
+    assert logged_out["credentials_kept"] is True
+    assert password not in str(logged_out)
+
+
+def test_account_service_ensure_login_without_credentials(fake_source):
+    result = call_service("jm.account", 1, "ensure_login", {})
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_NOT_LOGGED_IN
+    assert fake_source.login_calls == []
+
+
+def test_account_service_ignores_credentials_in_payload(fake_source):
+    """插件不能通过服务 payload 偷塞账号密码（凭据只走主程序入口）。"""
+    result = call_service(
+        "jm.account",
+        1,
+        "login",
+        {"username": "plugin", "password": "PLUGIN-SECRET"},
+    )
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_NOT_LOGGED_IN
+    assert fake_source.login_calls == []
+
+
+def test_login_status_reports_empty_error_fields(fake_source):
+    """login_status 是查询，成功查询时错误字段为空串。"""
+    result = call_service("jm.account", 1, "login_status", {})
+    assert result["ok"] is True
+    assert result["error_code"] == ""
+    assert result["error_message"] == ""
+    assert result["username_masked"] == ""
 
 
 def test_unknown_method_raises_service_error(fake_source):

@@ -38,12 +38,15 @@ public partial class DownloadPage : UserControl
     /// <summary>start_download 调用进行中（防重复点击）。</summary>
     private bool _starting;
 
+    /// <summary>应用设置：只用于记忆下载目录，不存任何凭据。</summary>
+    private readonly AppSettings _settings = AppSettings.Load();
+
     public DownloadPage()
     {
         InitializeComponent();
 
-        // 计划书 11.6：默认下载路径为桌面（不硬编码任何机器路径）。
-        InputDir.Text = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        // 计划书 11.6：默认下载路径为桌面；阶段 3 起优先使用上次选择且仍存在的目录。
+        InputDir.Text = AppSettings.ResolveDownloadDirectory(_settings.DownloadDir);
 
         // 主窗口在 App.OnStartup 之后才创建，此时事件中继通常已就绪；
         // 同时也在 Loaded 再补一次，覆盖启动失败后重试等情况。
@@ -191,6 +194,7 @@ public partial class DownloadPage : UserControl
         if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.FolderName))
         {
             InputDir.Text = dialog.FolderName;
+            RememberDownloadDirectory(dialog.FolderName);
         }
     }
 
@@ -280,6 +284,9 @@ public partial class DownloadPage : UserControl
             SetStatus("当前有下载任务在运行，请等待完成或取消后再开始。");
             return null;
         }
+
+        // 用户点「开始下载」时把最终目录写回设置（只写路径）。
+        RememberDownloadDirectory(InputDir.Text);
 
         _starting = true;
         _awaitingBatch = true;
@@ -407,6 +414,22 @@ public partial class DownloadPage : UserControl
     private void SetStatus(string text)
     {
         TextStatus.Text = text;
+    }
+
+    /// <summary>
+    /// 记住最终下载目录（只写路径到 AppSettings，绝不写账号/密码）。
+    /// 写入失败由 AppSettings 静默回退，不影响本次下载。
+    /// </summary>
+    private void RememberDownloadDirectory(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) ||
+            string.Equals(_settings.DownloadDir, path, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _settings.DownloadDir = path;
+        _settings.Save();
     }
 
     private void ShowMessage(string text, string caption, MessageBoxImage icon)

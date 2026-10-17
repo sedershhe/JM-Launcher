@@ -23,6 +23,17 @@
     cover_bytes(book_id: str) -> bytes | None
         返回封面原图字节；失败返回 None
 
+可选账号方法（收藏夹/账号功能使用；假实现按需提供）：
+
+    login(username: str, password: str) -> bool
+        成功返回 True；凭据错误抛 ``errors.InvalidCredentialsError``；
+        网络失败抛 ``ConnectionError`` / ``TimeoutError`` /
+        ``jmcomic.RequestRetryAllFailException``；其它接口错误抛 jmcomic 异常
+    logout() -> None
+        清理内存登录态（不联网、不落盘）
+    is_logged_in() -> bool
+        返回当前数据源会话是否已登录
+
 本模块不硬编码任何绝对路径；图片临时目录由调用方（downloader）传入。
 """
 
@@ -43,6 +54,7 @@ from jml.core.errors import (
     ERROR_RESPONSE_INVALID,
     ImageError,
     InvalidArgumentError,
+    InvalidCredentialsError,
     sanitize_text,
 )
 from jml.core.protocol import EVENT_DOWNLOAD_LOG
@@ -177,6 +189,10 @@ class JmcomicSource:
         self._lock = threading.RLock()
         self._option = None
         self._client = None
+        #: 登录态由本模块维护（jmcomic 2.7.1 的 API 客户端没有可靠的登录标记，
+        #: 详见 ``login`` 的文档字符串）。
+        self._logged_in = False
+        self._username = ""
 
     # -- 客户端 -------------------------------------------------------------
 
@@ -190,6 +206,107 @@ class JmcomicSource:
                 self._option = jmcomic.JmOption.default()
                 self._client = self._option.new_jm_client()
             return self._client
+
+    # -- 账号（凭据只进内存，不写 JmOption 文件） ---------------------------
+
+    def login(self, username: str, password: str) -> bool:
+        """用 jmcomic 客户端登录，成功返回 ``True``。
+
+        查证依据（jmcomic 2.7.1 源码）：
+
+        - 默认客户端实现是 API（``jm_config.py:471``
+          ``DEFAULT_CLIENT_IMPL = 'api'``），实际类型为
+          ``jmcomic.jm_client_impl.JmApiClient``；
+        - 登录入口是 ``JmApiClient.login``（``jm_client_impl.py:802``），
+          内部调用 ``req_api('/login', False, data=...)``（``:829``），
+          ``req_api`` 默认 ``require_success=True``（``:884``），
+          响应 JSON 的 ``code != 200`` 时由 ``JmApiResp.require_success``
+          抛 ``ResponseUnexpectedException``（``jm_client_interface.py:40``、
+          ``:113``；``jm_exception.py:137``）——这是"凭据错误"的唯一类型信号；
+        - 网络重试全部失败抛 ``RequestRetryAllFailException``
+          （``jm_client_impl.py:212``），属于网络失败；
+        - 登录成功后 ``JmApiClient.login`` 只把 cookies 写进内存中的
+          postman 元数据（``:834-836``），**不写任何文件**，也不会设置
+          ``client._username``（只有网页端 ``JmHtmlClient.login`` 在
+          ``:414-415`` 设置它）。匿名会话同样带 ``AVS`` cookie，所以
+          ``AVS`` 不能当作登录态证据。因此登录态由本类的 ``_logged_in``
+          显式维护，``is_logged_in`` 返回它（网页端客户端的 ``_username``
+          作为辅助信号）。
+
+        本方法不把账号密码写进 ``JmOption``：``JmOption.default()`` 只在
+        内存里构造配置，本模块从不调用 ``to_file``；登录凭据只作为本次
+        ``client.login`` 的参数传入，不进入 option 的持久化字段。
+        """
+        import jmcomic
+
+        client = self._ensure_client()
+
+        # 重新登录前先清掉旧的“已登录”标记（cookie 先留着，登录失败再作废）；
+        # 避免旧会话的 _username 让 is_logged_in 误报。
+        with self._lock:
+            self._logged_in = False
+            self._username = ""
+            if hasattr(client, "_username"):
+                client._username = None
+
+        try:
+            resp = client.login(username, password)
+        except jmcomic.ResponseUnexpectedException as exc:
+            # 不读异常文案：HTTP 5xx 视为接口异常，其余（含 HTTP 200 +
+            # JSON code != 200）视为凭据错误。响应状态是结构化字段。
+            if _http_status_code(exc) >= 500:
+                raise jmcomic.JmcomicException(
+                    "禁漫登录接口异常（HTTP 5xx）", {}
+                ) from None
+            raise InvalidCredentialsError("账号或密码不正确") from None
+        except (TimeoutError, ConnectionError):
+            # 网络类异常交给 ``errors.classify`` 按类型映射为
+            # TIMEOUT / NETWORK_ERROR。
+            raise
+        except jmcomic.JmcomicException:
+            # RequestRetryAllFailException（网络）等交给分类器。
+            raise
+
+        if resp is False:
+            raise InvalidCredentialsError("账号或密码不正确")
+
+        with self._lock:
+            self._logged_in = True
+            self._username = str(username)
+        return True
+
+    def logout(self) -> None:
+        """清理内存登录态（清 cookie，不联网、不落盘）。"""
+        with self._lock:
+            self._logged_in = False
+            self._username = ""
+            client = self._client
+            if client is None:
+                return
+            try:
+                # JmApiClient 的会话只存在 postman 元数据里；清成空字典即可
+                # 让后续请求回到匿名状态，不触碰任何配置文件。
+                client["cookies"] = {}
+                if hasattr(client, "_username"):
+                    client._username = None
+            except Exception as exc:  # 清理失败只记诊断，不影响登出入口
+                # 只记类型名：原始异常消息可能夹带 cookie / 凭据。
+                diagnostics.record(
+                    "ACCOUNT_LOGOUT_CLEAR_FAILED",
+                    f"清理 jmcomic 内存登录 Cookie 失败: {type(exc).__name__}",
+                )
+
+    def is_logged_in(self) -> bool:
+        """返回当前会话是否已登录。
+
+        以本模块登录成功后置位的 ``_logged_in`` 为准；网页端客户端若自己
+        设置了 ``_username`` 也视为已登录（API 客户端没有这个字段）。
+        ``AVS`` 匿名 cookie 不能作为判据。
+        """
+        with self._lock:
+            if self._logged_in:
+                return True
+            return bool(getattr(self._client, "_username", None))
 
     # -- 协议实现 -----------------------------------------------------------
 
@@ -409,6 +526,18 @@ def _to_int(value: object, default: int = 0) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _http_status_code(exc: BaseException) -> int:
+    """从 jmcomic 响应异常里取 HTTP 状态码（取不到返回 0）。
+
+    只读结构化字段 ``exc.resp.http_code``，不解析异常消息文案。
+    """
+    try:
+        resp = getattr(exc, "resp", None)
+        return int(getattr(resp, "http_code", 0) or 0)
+    except Exception:
+        return 0
 
 
 def _missing_album(jmcomic_module, jmid: object) -> Exception:

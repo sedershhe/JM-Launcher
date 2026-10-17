@@ -784,11 +784,12 @@ public class UiSmokeTests
     }
 
     /// <summary>
-    /// 页面外边距与卡片间距（PCL2）：下载页 25,10,25,25、卡片竖向间距 12；
-    /// 搜索页 25、搜索卡→结果卡 15、分页卡上距 15；详情窗内边距 25。
+    /// 页面外边距与卡片间距：下载页 25,10,25,25、卡片竖向间距 12；
+    /// 搜索页紧凑化后左右 25 / 上下 20、搜索卡→结果卡 8、分页卡上距 8；
+    /// 900×550 默认窗口下搜索卡高度 &lt; 100、结果列表可视高度 &gt; 250（约 2 行 × 127）。
     /// </summary>
     [Fact]
-    public void Pages_ContentMargins_ArePcl25()
+    public void Pages_ContentMargins_ArePclCompact()
     {
         RunOnUiThread(() =>
         {
@@ -799,11 +800,30 @@ public class UiSmokeTests
             Assert.Equal(new Thickness(0, 12, 0, 0), Find<JmlCard>(download, "CardLog").Margin);
 
             var search = new SearchPage();
-            Assert.Equal(new Thickness(25), Assert.IsType<Grid>(search.Content).Margin);
+            var searchRoot = Assert.IsType<Grid>(search.Content);
+            Assert.Equal(new Thickness(25, 20, 25, 20), searchRoot.Margin);
             var searchCard = Find<JmlCard>(search, "CardSearch");
-            Assert.Equal(new Thickness(0, 0, 0, 15), searchCard.Margin);
-            Assert.Equal(new Thickness(25, 40, 25, 15), searchCard.Padding);
-            Assert.Equal(new Thickness(0, 15, 0, 0), Find<JmlCard>(search, "CardPages").Margin);
+            Assert.Equal(new Thickness(0, 0, 0, 8), searchCard.Margin);
+            Assert.Equal(new Thickness(25, 32, 25, 8), searchCard.Padding);
+            var pagesCard = Find<JmlCard>(search, "CardPages");
+            Assert.Equal(new Thickness(0, 8, 0, 0), pagesCard.Margin);
+            Assert.Equal(new Thickness(10, 5, 10, 5), pagesCard.Padding);
+
+            // 状态文字已从搜索卡移进分页卡（与页码同一行右侧），仍按 x:Name 取用。
+            var status = Find<TextBlock>(search, "TextStatus");
+            Assert.Same(pagesCard, FindAncestor<ContentControl>(status));
+
+            // 模拟 900×550 默认窗口的内容区：550 - 10×2（透明外边）- 8×2（内层窗体）
+            // - 48（标题栏）= 466（MainWindow.xaml:17 / 123 / 134）。
+            Layout(search, 900, 466);
+            Assert.Equal(52, Find<Button>(search, "BtnSearch").ActualHeight);
+            Assert.True(
+                searchCard.ActualHeight < 100,
+                $"搜索卡实测高 {searchCard.ActualHeight:0.#}；期望 < 100（紧凑化前约 131）。");
+            Assert.True(
+                Find<ListBox>(search, "ResultList").ActualHeight > 250,
+                $"结果列表可视高度实测 {Find<ListBox>(search, "ResultList").ActualHeight:0.#}；" +
+                "期望 > 250（结果行约 127 高，需完整容纳 2 行）。");
 
             var detail = new DetailWindow("123456");
             try

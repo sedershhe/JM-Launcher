@@ -23,6 +23,14 @@
                                                    搜索/翻页，返回 JSON
     get_detail(book_id: str) -> str                详情，返回 JSON
     fetch_cover(book_id: str) -> bytes | None      封面原图字节（唯一非 JSON 入口）
+    account_set_credentials(username: str, password: str) -> str
+                                                   账号写入进程内存，返回 JSON
+    account_login() -> str                         用内存凭据登录，返回 JSON
+    account_login_with(username: str, password: str) -> str
+                                                   一次性登录（不长期保留凭据）
+    account_logout() -> str                        退出登录（默认保留内存凭据）
+    account_status() -> str                        查询登录态（用户名打码）
+    account_clear() -> str                         清空凭据与登录态（修改账号前）
     emit_test_event(event_type: str, payload: dict) -> str
                                                    测试入口，返回 JSON
 
@@ -39,6 +47,7 @@ import json
 import threading
 
 from jml.core import (
+    account,
     book_ids,
     cover,
     detail,
@@ -50,6 +59,8 @@ from jml.core import (
 from jml.core.errors import (
     ERROR_BATCH_NOT_FOUND,
     ERROR_INVALID_ARGUMENT,
+    ERROR_MESSAGES,
+    ERROR_UNKNOWN,
     classify,
     error_payload,
     make_error,
@@ -91,6 +102,26 @@ def _dumps(value: object) -> str:
 def _failure(exc: BaseException) -> str:
     """异常 → 失败形态 JSON（入口函数兜底用）。"""
     return _dumps(error_payload(exc))
+
+
+def _account_failure(exc: BaseException) -> str:
+    """账号入口的兜底失败形态（**不拼接原始异常文案**，防凭据泄漏）。
+
+    账号相关文本可能来自第三方登录异常，即使 ``sanitize_text`` 也可能
+    漏掉裸密码；这里只回传错误码对应的固定中文文案。
+    """
+    info = classify(exc)
+    return _dumps(
+        {
+            "ok": False,
+            "logged_in": False,
+            "username_masked": "",
+            "error_code": info.error_code,
+            "error_message": ERROR_MESSAGES.get(
+                info.error_code, ERROR_MESSAGES[ERROR_UNKNOWN]
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +527,72 @@ def fetch_cover(book_id: str) -> bytes | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# 账号入口（阶段 3；凭据只在内存，绝不落盘）
+# ---------------------------------------------------------------------------
+
+
+def account_set_credentials(username: str, password: str) -> str:
+    """把账号密码放进进程内存（覆盖旧值），返回 JSON。
+
+    成功::
+
+        {"ok": true, "logged_in": bool, "username_masked": str,
+         "error_code": "", "error_message": ""}
+
+    空账号 / 空密码 → ``INVALID_ARGUMENT``。**凭据不写文件、不进日志**；
+    返回值只含打码用户名，不含明文密码。
+    """
+    try:
+        return _dumps(account.set_credentials(username, password))
+    except Exception as exc:  # pragma: no cover - account 内部已收口
+        return _account_failure(exc)
+
+
+def account_login() -> str:
+    """用内存中的凭据登录，返回 JSON（成功 ``logged_in=true``）。"""
+    try:
+        return _dumps(account.login())
+    except Exception as exc:  # pragma: no cover
+        return _account_failure(exc)
+
+
+def account_login_with(username: str, password: str) -> str:
+    """一次性登录：凭据不写入 Python 长期内存，返回 JSON。
+
+    供 C# 把凭据管理器 / DPAPI 读出的账号密码直接递进来。登录成功后
+    会话仍在数据源客户端（收藏夹可用），但 Python 侧不再保留密码。
+    """
+    try:
+        return _dumps(account.login_with(username, password))
+    except Exception as exc:  # pragma: no cover
+        return _account_failure(exc)
+
+
+def account_logout() -> str:
+    """退出登录：默认保留内存凭据，只清登录态，返回 JSON。"""
+    try:
+        return _dumps(account.logout())
+    except Exception as exc:  # pragma: no cover
+        return _account_failure(exc)
+
+
+def account_status() -> str:
+    """查询登录态；用户名必须打码，返回 JSON。"""
+    try:
+        return _dumps(account.login_status())
+    except Exception as exc:  # pragma: no cover
+        return _account_failure(exc)
+
+
+def account_clear() -> str:
+    """清空内存凭据与登录态（修改账号前调用），返回 JSON。"""
+    try:
+        return _dumps(account.clear_credentials())
+    except Exception as exc:  # pragma: no cover
+        return _account_failure(exc)
+
+
 def emit_test_event(event_type: str, payload: dict) -> str:
     """测试入口：向事件总线派发一个事件，返回 JSON。
 
@@ -548,6 +645,7 @@ def reset_host_state() -> None:
     events.reset()
     loader.reset()
     searcher.reset_shared_session()
+    account.reset_state()
     jm_source.reset_source()
     downloader.reset()
     diagnostics.set_log_dir(None)

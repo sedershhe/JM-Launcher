@@ -28,6 +28,13 @@ public static class AppPaths
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JML", "cache");
 
     /// <summary>
+    /// DPAPI 回退凭据文件：%APPDATA%\JML\account.dat（内容为 DPAPI 加密后的密文）。
+    /// 首选 Windows 凭据管理器，只有它不可用时才使用本文件；绝不明文。
+    /// </summary>
+    public static string AccountFilePath { get; } =
+        Path.Combine(ConfigDirectory, "account.dat");
+
+    /// <summary>
     /// 下载临时工作目录：%LOCALAPPDATA%\JML\tmp。
     /// 启动下载时必须显式传给 Python 的 work_dir，避免崩溃残留落到用户下载夹（契约 §九.4）。
     /// </summary>

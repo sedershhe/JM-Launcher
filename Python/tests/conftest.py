@@ -112,7 +112,7 @@ def reset_host_state():
     诊断环表与落盘目录也在这里重置。
     """
     from jml import events
-    from jml.core import diagnostics, downloader, jm_source, searcher
+    from jml.core import account, diagnostics, downloader, jm_source, searcher
     from jml.host import loader, registry
 
     def _reset_all() -> None:
@@ -123,6 +123,7 @@ def reset_host_state():
         diagnostics.clear()
         # 阶段 2：共享搜索会话、数据源单例与下载批次登记也要隔离
         searcher.reset_shared_session()
+        account.reset_state()
         jm_source.reset_source()
         downloader.reset()
 
@@ -216,6 +217,7 @@ class FakeSource:
     ``tracker``（需有 ``enter()``/``exit()``）。
     搜索/详情/封面参数：``search_results`` / ``total_pages`` / ``album`` /
     ``album_error`` / ``cover_data`` / ``cover_error`` / ``search_error``。
+    账号参数：``login_result`` / ``login_error`` / ``login_delay``。
     """
 
     def __init__(
@@ -237,6 +239,9 @@ class FakeSource:
         cover_error: BaseException | None = None,
         search_error: BaseException | None = None,
         record_dest_dirs: bool = False,
+        login_result: bool = True,
+        login_error: BaseException | None = None,
+        login_delay: float = 0.0,
     ) -> None:
         self.books = dict(books or {})
         self.chapters = chapters
@@ -258,10 +263,16 @@ class FakeSource:
         self.cover_error = cover_error
         self.search_error = search_error
         self.record_dest_dirs = record_dest_dirs
+        self.login_result = login_result
+        self.login_error = login_error
+        self.login_delay = login_delay
 
         self.search_calls: list[tuple[str, int]] = []
         self.album_calls: list[str] = []
         self.cover_calls: list[str] = []
+        self.login_calls: list[tuple[str, str]] = []
+        self.logout_calls = 0
+        self.logged_in = False
         self.dest_dirs: list[str] = []
         self.downloaded = 0
         self.chapters_started = 0
@@ -363,8 +374,59 @@ class FakeSource:
             raise self.cover_error
         return self.cover_data
 
+    # -- 账号（可选协议） ---------------------------------------------------
+
+    def login(self, username: str, password: str) -> bool:
+        if self.login_delay:
+            time.sleep(self.login_delay)
+        with self.lock:
+            self.login_calls.append((username, password))
+        if self.login_error is not None:
+            raise self.login_error
+        if self.login_result is False:
+            return False
+        self.logged_in = True
+        return True
+
+    def logout(self) -> None:
+        with self.lock:
+            self.logout_calls += 1
+        self.logged_in = False
+
+    def is_logged_in(self) -> bool:
+        return self.logged_in
+
 
 @pytest.fixture
 def fake_source_cls():
     """返回共享 FakeSource 类（各测试按需实例化不同配置）。"""
     return FakeSource
+
+
+# ---------------------------------------------------------------------------
+# 可选的真实登录验证辅助（仅测试；产品代码绝不读取此文件）
+# ---------------------------------------------------------------------------
+
+
+def load_test_credentials() -> tuple[str, str] | None:
+    """从 ``JML_TEST_CREDENTIALS_FILE`` 读取本地不入库 JSON。
+
+    格式：``{"username": "...", "password": "..."}``。
+    未设置环境变量时返回 ``None``；设置了但字段为空/JSON 不合法时抛
+    ``ValueError``（调用方决定是否跳过真实登录）。
+
+    **只在测试辅助里出现**：``Python/jml`` 产品代码没有任何读取该文件的路径，
+    构建产物不包含凭据。
+    """
+    path = os.environ.get("JML_TEST_CREDENTIALS_FILE")
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    if not username or not password:
+        raise ValueError(
+            "JML_TEST_CREDENTIALS_FILE 缺少 username 或 password"
+        )
+    return username, password

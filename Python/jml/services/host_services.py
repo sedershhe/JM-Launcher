@@ -1,11 +1,11 @@
-"""主程序服务（阶段 2 真实化；插件通过 ``call_service`` 调用）。
+"""主程序服务（阶段 2/3 真实化；插件通过 ``call_service`` 调用）。
 
 四个服务（版本均为 1）：
 
 - ``jm.search``   搜索 / 翻页（关键词快照语义见 ``core.searcher``）
 - ``jm.detail``   详情
 - ``jm.download`` 批量下载登记 / 取消 / 查询进度
-- ``jm.account``  账号（阶段 3 才有真业务，这里返回结构化 NOT_AVAILABLE，不抛异常）
+- ``jm.account``  账号登录态（阶段 3；凭据只在内存，见 ``core.account``）
 
 调用统一签名（技术方案 2.2）::
 
@@ -16,15 +16,18 @@
 - 失败 ``{"ok": False, "error_code": ..., "error_message": ...}``；
 - 未知方法抛 ``ServiceError``（属调用方拼错方法名，不是业务失败）。
 
+账号服务只接受方法名，不接受 payload 里的账号密码：凭据由主程序通过
+``jml_backend.account_set_credentials`` / ``account_login_with`` 传入，
+插件不能顺手把密码塞进服务调用里。
+
 本模块不联网（网络在 ``core.jm_source``）、不感知 UI。
 """
 
 from __future__ import annotations
 
-from jml.core import detail, downloader, searcher
+from jml.core import account, detail, downloader, searcher
 from jml.core.errors import (
     ERROR_BATCH_NOT_FOUND,
-    ERROR_NOT_AVAILABLE,
     classify,
     error_payload,
     make_error,
@@ -142,25 +145,34 @@ class _DownloadService(_HostService):
 
 
 # ---------------------------------------------------------------------------
-# jm.account（阶段 3 实现）
+# jm.account（阶段 3）
 # ---------------------------------------------------------------------------
 
 
 class _AccountService(_HostService):
-    METHODS = ("login_status", "ensure_login")
+    """账号登录态服务。
 
-    def call(self, method: str, payload: dict) -> dict:
-        """账号功能未实现：返回结构化失败，**不抛异常**（否则插件一调就炸）。"""
-        if method not in self.METHODS:
-            raise ServiceError(
-                f"服务 {self._service_name} 不支持方法 {method!r}, "
-                f"允许值: {', '.join(self.METHODS) or '(无)'}"
-            )
-        return {
-            "ok": False,
-            "error_code": ERROR_NOT_AVAILABLE,
-            "error_message": "账号功能阶段3实现",
-        }
+    - ``login_status`` / ``ensure_login``：查状态 / 确保已登录；
+    - ``login``：用主进程内存里的凭据登录；
+    - ``logout``：退出登录（保留内存凭据，见 ``core.account.logout``）。
+
+    与后端入口共用 ``core.account`` 的同一份 ``_STATE``，不各自维护副本。
+    payload 里的账号密码一律**不读取**，插件拿不到凭据写入通道。
+    """
+
+    METHODS = ("login_status", "ensure_login", "login", "logout")
+
+    def _method_login_status(self, payload: dict) -> dict:
+        return account.login_status()
+
+    def _method_ensure_login(self, payload: dict) -> dict:
+        return account.ensure_login()
+
+    def _method_login(self, payload: dict) -> dict:
+        return account.login()
+
+    def _method_logout(self, payload: dict) -> dict:
+        return account.logout()
 
 
 #: 主程序服务表: 服务名 → 服务实例
