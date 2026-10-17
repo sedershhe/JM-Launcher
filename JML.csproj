@@ -8,6 +8,12 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>JML</RootNamespace>
     <AssemblyName>JML</AssemblyName>
+
+    <!-- 默认编译项排除临时/证据目录：按项目规则，Draw\ 与 Delete\ 专门存放临时文件与
+         验收证据，而 MSBuild 的默认 glob 不看 .gitignore。子代理在 Draw\ 或 Delete\ 下留过
+         临时 C# 工程时，其 obj\...AssemblyInfo.cs 会被卷进主项目，报 CS0579 特性重复。
+         这里从默认项里整体剔掉这些目录，避免"临时文件污染构建"。 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Draw\**;Delete\**;_pytest_*\**;_pt_*\**;pip-*\**;pytest-cache-files-*\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

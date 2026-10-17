@@ -13,9 +13,11 @@
 
     search(keyword: str, page: int) -> dict
         返回 {"keyword", "page", "total_pages", "results": [ {...} ]}
+        列表接口不提供页数时，结果里的 ``page_count`` 为 0（由搜索层做有界补全）
     get_album(book_id: str) -> dict
         返回 {"book_id","title","author","page_count","tags","description",
               "cover_url","chapters":[{"photo_id","index","title"}]}
+        ``page_count`` 必须是真实页数；确实取不到才为 0
     iter_chapter_images(book_id: str, chapter: dict, dest_dir: str) -> Iterator[str]
         逐张下载本章图片到 dest_dir，产出本地文件路径
     cover_bytes(book_id: str) -> bytes | None
@@ -192,7 +194,13 @@ class JmcomicSource:
     # -- 协议实现 -----------------------------------------------------------
 
     def search(self, keyword: str, page: int) -> dict:
-        """关键词搜索一页，返回统一结构。"""
+        """关键词搜索一页，返回统一结构。
+
+        jmcomic 2.7.1 的搜索接口每条只返回 name / tags 等字段，**不含页数**
+        （见 ``jm_toolkit.parse_api_to_search_page`` 的行为），所以这里
+        ``page_count`` 通常为 0；有界并发补全由 ``searcher`` 统一负责，
+        避免本模块把网络策略扩散到业务层。
+        """
         import jmcomic
 
         client = self._ensure_client()
@@ -210,7 +218,11 @@ class JmcomicSource:
                     "book_id": str(album_id),
                     "title": str(info.get("name") or ""),
                     "author": str(author),
-                    "page_count": _to_int(info.get("page_count")),
+                    # 列表接口若将来带上页数就直接透传（page_count / total_photos），
+                    # 现在两者都没有，恒为 0，由搜索层补全。
+                    "page_count": _to_int(
+                        info.get("page_count") or info.get("total_photos")
+                    ),
                     "tags": [str(tag) for tag in tags],
                     "cover_url": _cover_url(jmcomic, album_id),
                 }
@@ -223,11 +235,14 @@ class JmcomicSource:
         }
 
     def get_album(self, book_id: str) -> dict:
-        """取本子详情（含章节列表），返回统一结构。"""
+        """取本子详情（含章节列表 + 真实页数），返回统一结构。
+
+        页数取值链路见 ``_album_and_page_count``：正常情况一次请求同时拿到
+        专辑实体和 ``total_photos``，不需要为页数额外请求。
+        """
         import jmcomic
 
-        client = self._ensure_client()
-        album = client.get_album_detail(book_id)
+        album, page_count = self._album_and_page_count(book_id)
         chapters: list[dict] = []
         for index, episode in enumerate(getattr(album, "episode_list", []) or [], start=1):
             photo_id = episode[0] if len(episode) > 0 else ""
@@ -252,12 +267,92 @@ class JmcomicSource:
             "book_id": str(getattr(album, "album_id", book_id)),
             "title": str(getattr(album, "name", "") or ""),
             "author": author,
-            "page_count": _to_int(getattr(album, "page_count", 0)),
+            "page_count": page_count,
             "tags": [str(tag) for tag in tags],
             "description": str(getattr(album, "description", "") or ""),
             "cover_url": _cover_url(jmcomic, getattr(album, "album_id", book_id)),
             "chapters": chapters,
         }
+
+    # -- 页数解析 -----------------------------------------------------------
+
+    def _album_and_page_count(self, book_id: str) -> tuple[object, int]:
+        """取专辑实体并解析真实页数。
+
+        **为什么不能直接用 ``album.page_count``**：jmcomic 2.7.1 的 API 适配层
+        ``jm_toolkit.JmApiAdaptTool.post_adapt_album`` 把 ``page_count``
+        硬编码成 ``'0'``，``JmAlbumDetail.page_count`` 恒为 0；真实页数只存在
+        于专辑原始 JSON 的 ``total_photos`` 字段（实测 651712=42、565384=34，
+        与 ZIP 内图片数一致）。
+
+        所以这里直接取一次原始响应，再用 jmcomic 自己的解析器构造实体：
+        网络请求数与原来 ``get_album_detail`` 相同（1 次），但能拿到真实页数。
+        若当前客户端没有原始接口（例如将来换成 HTML 客户端），退回公共接口。
+        """
+        import jmcomic
+
+        client = self._ensure_client()
+        req_api = getattr(client, "req_api", None)
+        append_params = getattr(client, "append_params_to_url", None)
+        api_album = getattr(client, "API_ALBUM", None)
+        if req_api is not None and append_params is not None and api_album is not None:
+            try:
+                album, count = self._album_from_raw(
+                    jmcomic, req_api, append_params, api_album, book_id
+                )
+            except (AttributeError, KeyError, TypeError, IndexError) as exc:
+                # 上游接口结构变化时不让详情整体失败，退回公共接口并留诊断
+                diagnostics.record(
+                    "ALBUM_RAW_FALLBACK",
+                    f"专辑原始接口不可用，退回公共接口: book_id={book_id}",
+                    exc,
+                )
+            else:
+                if count <= 0:
+                    # 原始响应没有 total_photos（不同版本/接口）时再兜底
+                    count = self._page_count_from_album(client, album)
+                return album, count
+
+        album = client.get_album_detail(book_id)
+        return album, self._page_count_from_album(client, album)
+
+    @staticmethod
+    def _album_from_raw(jmcomic, req_api, append_params, api_album, book_id: str):
+        """用一次原始专辑请求构造 ``(实体, 页数)``。"""
+        jmid = jmcomic.JmcomicText.parse_to_jm_id(book_id)
+        resp = req_api(append_params(api_album, {"id": jmid}))
+        if not resp.encoded_data:
+            raise _missing_album(jmcomic, jmid)
+        data = resp.res_data
+        if data.get("name") is None:
+            raise _missing_album(jmcomic, jmid)
+        album = jmcomic.JmApiAdaptTool.parse_entity(data, jmcomic.JmAlbumDetail)
+        return album, _to_int(data.get("total_photos"))
+
+    @staticmethod
+    def _page_count_from_album(client, album) -> int:
+        """公共接口兜底：实体自带页数，或单章节本子按章节图片数求和。"""
+        count = _to_int(getattr(album, "page_count", 0))
+        if count > 0:
+            return count
+        episodes = getattr(album, "episode_list", None) or []
+        # 多章节本子不逐章请求（一次详情会变成几十次网络往返），保持 0；
+        # 单章节本子一次图片详情即可得到准确页数。
+        if len(episodes) != 1:
+            return 0
+        photo_id = episodes[0][0] if len(episodes[0]) > 0 else ""
+        try:
+            photo = client.get_photo_detail(
+                photo_id, fetch_album=False, fetch_scramble_id=False
+            )
+        except Exception as exc:
+            diagnostics.record(
+                "ALBUM_PAGE_COUNT_FAILED",
+                f"页数兜底求和失败: photo_id={photo_id}",
+                exc,
+            )
+            return 0
+        return len(getattr(photo, "page_arr", None) or [])
 
     def iter_chapter_images(
         self, book_id: str, chapter: dict, dest_dir: str
@@ -314,6 +409,13 @@ def _to_int(value: object, default: int = 0) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _missing_album(jmcomic_module, jmid: object) -> Exception:
+    """构造"本子不存在"异常（类型与 jmcomic 自身一致，错误码映射为 NOT_FOUND）。"""
+    return jmcomic_module.MissingAlbumPhotoException(
+        f"请求的本子不存在！(JM{jmid})", {"album_id": str(jmid)}
+    )
 
 
 def _cover_url(jmcomic_module, album_id: object) -> str:

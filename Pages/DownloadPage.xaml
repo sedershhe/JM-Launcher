@@ -1,7 +1,10 @@
 <!--
-    下载页（阶段 1：仅界面框架）
-    布局：上方输入区（地址输入 + 目录选择 + 开始/取消），下方日志区。
-    业务逻辑（下载/搜索接口调用）在阶段 2 由 backend-agent 实现，本页不接事件。
+    下载页（阶段 2-C）
+    布局：上方输入区（批量编号 + 保存目录 + 开始/取消 + 状态行），下方日志区。
+    纪律：
+      1) 编号分隔符/去重/合法性、下载目录校验、产物命名、成功失败统计全部由 Python 决定；
+      2) 日志只显示本批次（空 batch_id 的全局日志同样显示），自动滚到底；
+      3) 桥接调用一律 await，本文件不含任何业务逻辑。
 -->
 <UserControl x:Class="JML.Pages.DownloadPage"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -12,12 +15,18 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- 上方：输入与操作区 -->
-        <ContentControl Grid.Row="0" Style="{StaticResource PlainCard}">
+        <!-- 上方：输入与操作区
+             注意：PlainCard 模板的 ContentPresenter 用 TemplateBinding 跟随
+             HorizontalContentAlignment / VerticalContentAlignment（WPF 默认 Left/Top），
+             不显式设 Stretch 时卡片内容会按内容宽度收缩、靠左上角排列。 -->
+        <ContentControl Grid.Row="0" Style="{StaticResource PlainCard}"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch">
             <StackPanel>
-                <TextBlock Text="下载功能（阶段 2 实现）" FontSize="15" FontWeight="SemiBold" />
-                <TextBlock Text="输入本子地址或编号，选择保存目录后开始下载。"
+                <TextBlock Text="批量下载" FontSize="15" FontWeight="SemiBold" />
+                <TextBlock Text="支持一次输入多个本子编号，分隔符：- , ， 、 ; ； 或任意空白（例如 123456,234567，345678）。"
                            Margin="0,4,0,12"
+                           TextWrapping="Wrap"
                            Foreground="{DynamicResource ColorBrushGray3}" />
 
                 <Grid>
@@ -25,9 +34,11 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="地址：" VerticalAlignment="Center" Margin="0,0,8,0" />
-                    <TextBox x:Name="InputUrl" Grid.Column="1"
-                             ToolTip="支持本子地址或编号" />
+                    <TextBlock Text="本子编号：" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <TextBox x:Name="InputIds" Grid.Column="1"
+                             Style="{StaticResource JmlInputBox}"
+                             MinHeight="32"
+                             ToolTip="可一次填多个编号，用 - , ， 、 ; ； 或空格分隔" />
                 </Grid>
 
                 <Grid Margin="0,10,0,0">
@@ -37,30 +48,48 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Text="保存目录：" VerticalAlignment="Center" Margin="0,0,8,0" />
-                    <TextBox x:Name="InputDir" Grid.Column="1" IsReadOnly="True" />
-                    <Button x:Name="BtnBrowse" Grid.Column="2" Content="浏览…" Margin="8,0,0,0" />
+                    <TextBox x:Name="InputDir" Grid.Column="1"
+                             Style="{StaticResource JmlInputBox}"
+                             MinHeight="32"
+                             IsReadOnly="True" />
+                    <Button x:Name="BtnBrowse" Grid.Column="2" Content="浏览…"
+                            Margin="8,0,0,0" MinWidth="76" Click="BtnBrowse_Click" />
                 </Grid>
 
                 <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
-                    <Button x:Name="BtnStart" Content="开始下载" />
-                    <Button x:Name="BtnCancel" Content="取消" Margin="10,0,0,0" IsEnabled="False" />
+                    <Button x:Name="BtnStart" Content="开始下载"
+                            MinWidth="96" Click="BtnStart_Click" />
+                    <Button x:Name="BtnCancel" Content="取消"
+                            Margin="10,0,0,0" MinWidth="76"
+                            IsEnabled="False" Click="BtnCancel_Click" />
                 </StackPanel>
+
+                <TextBlock x:Name="TextStatus" Margin="0,10,0,0"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ColorBrushGray3}" />
             </StackPanel>
         </ContentControl>
 
-        <!-- 下方：日志区 -->
-        <ContentControl Grid.Row="1" Style="{StaticResource PlainCard}" Margin="0,12,0,0">
+        <!-- 下方：日志区（只读、自动滚到底）
+             同上：不设 Stretch 时 LogBox 只拿到内容期望尺寸（实测 117×160 的窄条），不铺满卡片。 -->
+        <ContentControl Grid.Row="1" Style="{StaticResource PlainCard}" Margin="0,12,0,0"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
-                <TextBlock Text="下载日志" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <TextBlock Text="下载日志（本批次）" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <TextBox x:Name="LogBox" Grid.Row="1"
+                         Style="{StaticResource PlainTextBox}"
                          IsReadOnly="True"
                          AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Auto"
                          TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled"
+                         VerticalContentAlignment="Top"
+                         MinHeight="160"
                          FontFamily="Consolas" FontSize="12" />
             </Grid>
         </ContentControl>

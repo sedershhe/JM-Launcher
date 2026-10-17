@@ -5,7 +5,7 @@ using JML.Pages;
 namespace JML;
 
 /// <summary>
-/// JM Launcher 主窗口（阶段 1）。
+/// JM Launcher 主窗口（阶段 1 骨架 + 阶段 2 接线）。
 ///
 /// 启动流程：
 ///   1. 先显示 PythonSetupPage（Python 环境检测，后台线程执行）；
@@ -16,7 +16,9 @@ namespace JML;
 ///   插件功能页双击 → PushInner（内页）；顶部「← 返回」→ PopInner。
 ///   顶部标题栏在主模式/内页模式间的切换由 InnerChanged 事件驱动。
 ///
-/// 约束：本类只做界面调度，不含任何业务逻辑；Python 调用一律经 Bridge 层 + Task.Run。
+/// 阶段 2 接线（本类只做界面调度，不含业务逻辑）：
+///   搜索页「下载」/ 详情窗「下载本子」→ 切到下载页 + 传编号自动开始；
+///   详情窗由本窗口统一持有/打开，避免多实例互相抢下载日志。
 /// </summary>
 public partial class MainWindow : Window
 {
@@ -28,6 +30,9 @@ public partial class MainWindow : Window
     private readonly SettingsPage _settingsPage = new();
     private readonly PluginHubPage _pluginHubPage = new();
 
+    /// <summary>详情窗单实例（MainWindow 统一持有）。</summary>
+    private DetailWindow? _detailWindow;
+
     private bool _setupPassed;
 
     public MainWindow()
@@ -37,6 +42,10 @@ public partial class MainWindow : Window
         _nav.MainChanged += OnMainChanged;
         _nav.InnerChanged += OnInnerChanged;
         _pluginHubPage.FeatureRequested += OnFeatureRequested;
+
+        // 搜索页的行内「详情」「下载」由主窗口协调。
+        _searchPage.DownloadRequested += OnSearchDownloadRequested;
+        _searchPage.DetailRequested += OnSearchDetailRequested;
 
         Loaded += (_, _) => ShowSetup();
     }
@@ -85,6 +94,73 @@ public partial class MainWindow : Window
     private void OnFeatureRequested(object? sender, PluginFeaturesView.FeatureItem item)
     {
         _nav.PushInner(item.PageId, item.PageTitle);
+    }
+
+    // ------------------------------------------------------------------
+    // 阶段 2 接线：搜索 / 详情 → 下载页
+    // ------------------------------------------------------------------
+
+    private async void OnSearchDownloadRequested(object? sender, string bookId)
+    {
+        await StartDownloadFromOtherPageAsync(new[] { bookId });
+    }
+
+    private void OnSearchDetailRequested(object? sender, string bookId)
+    {
+        OpenDetailWindow(bookId);
+    }
+
+    private async void OnDetailDownloadRequested(object? sender, string bookId)
+    {
+        await StartDownloadFromOtherPageAsync(new[] { bookId });
+    }
+
+    /// <summary>
+    /// 切到下载页，把编号交给下载页自动开始；成功后把 batch_id 告知详情窗，
+    /// 让详情窗只过滤本书批次的日志（旧缺陷 #6：各窗口各按 batch_id 分窗）。
+    /// </summary>
+    private async Task StartDownloadFromOtherPageAsync(IReadOnlyList<string> ids)
+    {
+        _nav.Navigate(MainPage.Download);
+        string? batchId = await _downloadPage.StartWithIds(ids);
+
+        if (string.IsNullOrEmpty(batchId))
+        {
+            _detailWindow?.NotifyDownloadNotStarted();
+            return;
+        }
+
+        _detailWindow?.TrackBatch(batchId!);
+    }
+
+    /// <summary>详情窗统一打开入口：单实例复用，关闭后置空。</summary>
+    private void OpenDetailWindow(string bookId)
+    {
+        if (string.IsNullOrWhiteSpace(bookId))
+        {
+            return;
+        }
+
+        if (_detailWindow is { } existing)
+        {
+            existing.SetBook(bookId);
+            existing.Activate();
+            return;
+        }
+
+        var window = new DetailWindow(bookId) { Owner = this };
+        window.DownloadRequested += OnDetailDownloadRequested;
+        window.Closed += (_, _) =>
+        {
+            window.DownloadRequested -= OnDetailDownloadRequested;
+            if (ReferenceEquals(_detailWindow, window))
+            {
+                _detailWindow = null;
+            }
+        };
+
+        _detailWindow = window;
+        window.Show();
     }
 
     private void OnMainChanged(object? sender, MainPage page)

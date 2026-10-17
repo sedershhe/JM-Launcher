@@ -123,6 +123,122 @@ def test_get_album_mapping(source_with_fake_client):
     assert [chapter["index"] for chapter in album["chapters"]] == [1, 2]
 
 
+# ---------------------------------------------------------------------------
+# 页数（DATA-1）：jmcomic 的 JmAlbumDetail.page_count 恒为 0，
+# 真实值在专辑原始 JSON 的 total_photos 里
+# ---------------------------------------------------------------------------
+
+
+def _raw_album(**overrides) -> dict:
+    data = {
+        "id": 651712,
+        "name": "原始标题",
+        "author": ["作者甲"],
+        "tags": ["标签A"],
+        "description": "原始简介",
+        "likes": "10",
+        "works": [],
+        "actors": [],
+        "related_list": [],
+        "total_views": "100",
+        "comment_total": "2",
+        "total_photos": 42,
+        "series": [{"id": "651712", "name": "第1话", "sort": "1"}],
+    }
+    data.update(overrides)
+    return data
+
+
+class FakeApiClient(FakeClient):
+    """在 FakeClient 上补出 API 客户端的原始请求能力（仍然离线）。"""
+
+    API_ALBUM = "/album"
+
+    def __init__(self, raw: dict | None = None) -> None:
+        super().__init__()
+        self.raw = _raw_album() if raw is None else raw
+        self.api_urls: list[str] = []
+
+    def append_params_to_url(self, url: str, params: dict) -> str:
+        return f"{url}?id={params.get('id')}"
+
+    def req_api(self, url: str):
+        self.api_urls.append(url)
+        return SimpleNamespace(encoded_data='{"code": 200}', res_data=dict(self.raw))
+
+
+def test_get_album_page_count_uses_raw_total_photos():
+    source = jm_source.JmcomicSource()
+    client = FakeApiClient()
+    source._client = client
+
+    album = source.get_album("651712")
+
+    assert client.api_urls == ["/album?id=651712"]
+    assert album["page_count"] == 42
+    assert album["title"] == "原始标题"
+    assert album["author"] == "作者甲"
+    assert [chapter["photo_id"] for chapter in album["chapters"]] == ["651712"]
+
+
+def test_get_album_falls_back_to_public_api_when_raw_shape_changes():
+    source = jm_source.JmcomicSource()
+    client = FakeApiClient(_raw_album(series=None))
+    source._client = client
+
+    album = source.get_album("1")
+
+    assert album["page_count"] == 20  # 公共接口兜底值
+    assert album["title"] == "详情标题"
+
+
+class FakeApiClientNoTotal(FakeApiClient):
+    """原始响应缺少 total_photos 时，单章节本子按章节图片数兜底。"""
+
+    def get_photo_detail(self, photo_id, fetch_album=True, fetch_scramble_id=True):
+        return SimpleNamespace(page_arr=["00001.webp"] * 42)
+
+
+def test_get_album_page_count_falls_back_when_raw_total_missing():
+    source = jm_source.JmcomicSource()
+    client = FakeApiClientNoTotal(_raw_album(total_photos=0))
+    source._client = client
+
+    album = source.get_album("651712")
+
+    assert album["page_count"] == 42
+
+
+class FakeZeroPageClient(FakeClient):
+    """公共接口也不带页数的客户端：单章节本子用图片数兜底求和。"""
+
+    def get_album_detail(self, book_id: str):
+        return SimpleNamespace(
+            album_id=str(book_id),
+            name="零页数标题",
+            authors=["作者甲"],
+            tags=[],
+            description="",
+            page_count=0,
+            episode_list=[("11", "1", "第1章")],
+        )
+
+    def get_photo_detail(self, photo_id, fetch_album=True, fetch_scramble_id=True):
+        self.photo_id = photo_id
+        return SimpleNamespace(page_arr=["00001.webp"] * 34)
+
+
+def test_get_album_page_count_falls_back_to_single_chapter_images():
+    source = jm_source.JmcomicSource()
+    client = FakeZeroPageClient()
+    source._client = client
+
+    album = source.get_album("1")
+
+    assert client.photo_id == "11"
+    assert album["page_count"] == 34
+
+
 def test_iter_chapter_images_downloads_each(tmp_path, source_with_fake_client):
     source, client = source_with_fake_client
     chapter = {"photo_id": "11", "index": 1, "title": "第1章"}

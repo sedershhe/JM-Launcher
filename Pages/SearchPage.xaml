@@ -1,7 +1,11 @@
 <!--
-    搜索页（阶段 1：仅界面框架）
-    布局：上方搜索框 + 按钮；中间结果列表；下方翻页控件。
-    业务逻辑在阶段 2 由 backend-agent 实现，本页不接事件。
+    搜索页（阶段 2-C）
+    布局：上方关键词 + 搜索状态；中间结果列表（封面 80×110 / 标题加粗 / 作者 / 页数 + JM 号 / 详情 + 下载）；
+          下方翻页（上一页 / 第 N 页 / 共 M 页 / 下一页）。
+    纪律：
+      1) 翻页关键词由 Python 会话快照决定，本页不记忆关键词；页码由界面传；
+      2) 封面只取字节，BitmapImage 在 UI 线程创建；失败显示暗红底 X；
+      3) 本页用 await Search() 返回值渲染，不额外处理 search.page_loaded 事件（避免双渲染）。
 -->
 <UserControl x:Class="JML.Pages.SearchPage"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -13,40 +17,125 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 上方：搜索框 -->
-        <ContentControl Grid.Row="0" Style="{StaticResource PlainCard}">
+        <!-- 上方：搜索框
+             注意：PlainCard 模板的 ContentPresenter 用 TemplateBinding 跟随
+             HorizontalContentAlignment / VerticalContentAlignment，而 WPF 的 ContentControl
+             这两项默认是 Left/Top —— 不显式设 Stretch 时，卡片内容按"内容期望宽度"左对齐，
+             TextBox 会缩成 11px 宽（真机 UIA 16px）视觉上等于不存在。 -->
+        <ContentControl Grid.Row="0" Style="{StaticResource PlainCard}"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch">
             <StackPanel>
-                <TextBlock Text="搜索功能（阶段 2 实现）" FontSize="15" FontWeight="SemiBold" />
-                <Grid Margin="0,10,0,0">
+                <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="InputKeyword" ToolTip="输入关键词" />
-                    <Button x:Name="BtnSearch" Grid.Column="1" Content="搜索" Margin="8,0,0,0" />
+                    <TextBox x:Name="KeywordBox"
+                             Style="{StaticResource JmlInputBox}"
+                             MinHeight="32"
+                             ToolTip="输入关键词后按回车或点「搜索」"
+                             KeyDown="KeywordBox_KeyDown" />
+                    <Button x:Name="BtnSearch" Grid.Column="1" Content="搜索"
+                            Margin="8,0,0,0" MinWidth="88" Click="BtnSearch_Click" />
                 </Grid>
+                <TextBlock x:Name="TextStatus" Margin="0,8,0,0"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ColorBrushGray3}" />
             </StackPanel>
         </ContentControl>
 
         <!-- 中间：结果列表 -->
-        <ContentControl Grid.Row="1" Style="{StaticResource PlainCard}" Margin="0,12,0,0">
+        <ContentControl Grid.Row="1" Style="{StaticResource PlainCard}" Margin="0,12,0,0"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch">
             <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-                <TextBlock Text="搜索结果" FontWeight="SemiBold" Margin="0,0,0,8" />
-                <ListBox x:Name="ResultList" Grid.Row="1" />
+                <ListBox x:Name="ResultList"
+                         BorderThickness="0"
+                         Background="Transparent"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         HorizontalContentAlignment="Stretch">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <!-- 封面：占位 → 图片；失败显示暗红底 X（计划书 11.6） -->
+                                <Grid Width="80" Height="110" VerticalAlignment="Center">
+                                    <Border Background="{DynamicResource ColorBrushGray7}"
+                                            CornerRadius="3"
+                                            Visibility="{Binding PlaceholderVisibility}">
+                                        <TextBlock Text="加载中…"
+                                                   FontSize="11"
+                                                   Foreground="{DynamicResource ColorBrushGray3}"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center" />
+                                    </Border>
+                                    <Border Background="{DynamicResource ColorBrushRedBack}"
+                                            CornerRadius="3"
+                                            Visibility="{Binding FailureVisibility}">
+                                        <TextBlock Text="X"
+                                                   FontSize="36" FontWeight="Bold"
+                                                   Foreground="{DynamicResource ColorBrushRedLight}"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center" />
+                                    </Border>
+                                    <Image Source="{Binding Cover}"
+                                           Stretch="UniformToFill"
+                                           Visibility="{Binding CoverVisibility}" />
+                                </Grid>
+
+                                <StackPanel Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Title}"
+                                               FontWeight="Bold" FontSize="14"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource ColorBrush1}" />
+                                    <TextBlock Text="{Binding Author}"
+                                               Margin="0,4,0,0"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource ColorBrushGray2}" />
+                                    <TextBlock Text="{Binding PageInfo}"
+                                               Margin="0,2,0,0"
+                                               FontSize="12"
+                                               Foreground="{DynamicResource ColorBrushGray3}" />
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Button Content="详情" MinWidth="64" Click="RowDetail_Click" />
+                                    <Button Content="下载" MinWidth="64" Margin="8,0,0,0"
+                                            Click="RowDownload_Click" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <!-- 空结果：灰色文字居中（计划书 11.6） -->
+                <TextBlock x:Name="TextEmpty"
+                           Text="未找到相关结果"
+                           Visibility="Collapsed"
+                           IsHitTestVisible="False"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           FontSize="14"
+                           Foreground="{DynamicResource ColorBrushGray3}" />
             </Grid>
         </ContentControl>
 
         <!-- 下方：翻页 -->
         <StackPanel Grid.Row="2" Orientation="Horizontal"
                     HorizontalAlignment="Center" Margin="0,12,0,0">
-            <Button x:Name="BtnPrev" Content="上一页" IsEnabled="False" />
-            <TextBlock x:Name="TextPage" Text="第 1 页"
-                       VerticalAlignment="Center" Margin="12,0" />
-            <Button x:Name="BtnNext" Content="下一页" IsEnabled="False" />
+            <Button x:Name="BtnPrev" Content="上一页"
+                    MinWidth="84" IsEnabled="False" Click="BtnPrev_Click" />
+            <TextBlock x:Name="TextPage" Text="第 1 页 / 共 1 页"
+                       VerticalAlignment="Center" Margin="12,0"
+                       Foreground="{DynamicResource ColorBrushGray2}" />
+            <Button x:Name="BtnNext" Content="下一页"
+                    MinWidth="84" IsEnabled="False" Click="BtnNext_Click" />
         </StackPanel>
     </Grid>
 </UserControl>

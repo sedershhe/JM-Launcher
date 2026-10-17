@@ -1,10 +1,20 @@
 <!--
     JML 自定义控件样式资源字典（阶段 1）
-    用途：顶部一级导航 RadioButton（NavRadioButton）与左侧栏列表项（SideListItem）。
+    用途：顶部一级导航 RadioButton（NavRadioButton）、左侧栏列表项（SideListItem）、
+          可输入文本框（JmlInputBox）。
     配色一律引用 PlainToolkit.UI 的 DynamicResource 画刷，不自行硬编码颜色。
 -->
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ========== 可输入文本框（基线主题的 PlainTextBox 空态几乎不可见） ==========
+         基线 PlainTextBox 的 Background=ColorBrushTransparent、BorderBrush=ColorBrushBg0
+         （≈卡片底色），未悬停/未聚焦时空输入框看不出边界。
+         这里只把 Background 换成模板里悬停态已经在用的淡色，模板本身与外部 UI 库都不动；
+         悬停/聚焦时模板的 HoverOverlay / FocusOverlay 仍按原逻辑覆盖。 -->
+    <Style x:Key="JmlInputBox" TargetType="TextBox" BasedOn="{StaticResource PlainTextBox}">
+        <Setter Property="Background" Value="{DynamicResource ColorBrushInputHoverBg}" />
+    </Style>
 
     <!-- ========== 顶部一级导航按钮（PCL2 风格：选中高亮、悬停变色） ========== -->
     <Style x:Key="NavRadioButton" TargetType="RadioButton">
