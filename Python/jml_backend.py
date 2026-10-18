@@ -12,6 +12,12 @@
     version() -> str                               后端代码版本
     bootstrap(plugins_dir: str) -> str             宿主引导（幂等），返回 JSON
     list_plugins(plugins_dir: str) -> str          只扫描不加载，返回 JSON
+    plugin_page_load(plugin_id: str, page_id: str, params_json: str) -> str
+                                                   结构化页面协议：载入页面，返回 JSON
+    plugin_page_action(plugin_id: str, page_id: str, action_id: str,
+                       payload_json: str) -> str   结构化页面协议：执行页面动作，返回 JSON
+    plugin_page_image(plugin_id: str, page_id: str, index: int) -> bytes | None
+                                                   结构化页面协议：图片原图字节（非 JSON 入口）
     list_plugin_settings() -> str                  已加载插件的设置定义，返回 JSON
     set_plugin_setting(plugin_id: str, key: str, value_json: str) -> str
                                                    写插件设置（按 schema 校验 + 落盘），返回 JSON
@@ -66,6 +72,7 @@ from jml.core.errors import (
     ERROR_MESSAGES,
     ERROR_NOT_FOUND,
     ERROR_UNKNOWN,
+    InvalidArgumentError,
     classify,
     error_payload,
     make_error,
@@ -295,6 +302,95 @@ def list_plugins(plugins_dir: str) -> str:
         )
     except Exception as exc:
         return _dumps(_host_failure(exc))
+
+
+# ---------------------------------------------------------------------------
+# 插件结构化页面协议入口（技术方案第三节方案 A）
+# ---------------------------------------------------------------------------
+
+
+def _parse_json_object(text, label: str) -> dict:
+    """把 ``*_json`` 参数解析成 dict；空串视为空 dict。
+
+    非 JSON / 非对象一律抛 ``InvalidArgumentError``（→ INVALID_ARGUMENT），
+    绝不把字符串当 dict 继续用。
+    """
+    if text is None:
+        return {}
+    value = text
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise InvalidArgumentError(f"{label}不是合法 JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise InvalidArgumentError(
+            f"{label}必须是 JSON 对象，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def plugin_page_load(plugin_id: str, page_id: str, params_json: str) -> str:
+    """载入插件页面，返回 JSON 字符串。
+
+    成功::
+
+        {"ok": true, "template": "list|browser|action|form",
+         "title": "<manifest 页面标题>", "data": {<模板 payload>}}
+
+    - ``plugin_id`` 必须是**已加载**插件，``page_id`` 必须在该插件
+      manifest 的 ``pages[]`` 里，否则 ``NOT_FOUND``；
+    - 插件未实现加载钩子（没有 ``ctx.register_page``）→ ``NOT_IMPLEMENTED``；
+    - ``params_json`` 为空串 → 空 dict；非法 JSON / 非对象 → ``INVALID_ARGUMENT``；
+    - 模板类型与标题**只来自 manifest**，插件返回值不能改变它们，
+      也不能返回任意界面描述。
+    """
+    try:
+        from jml.host import pages
+
+        params = _parse_json_object(params_json, "页面参数")
+        return _dumps(pages.load_page(plugin_id, page_id, params))
+    except Exception as exc:
+        return _failure(exc)
+
+
+def plugin_page_action(
+    plugin_id: str, page_id: str, action_id: str, payload_json: str
+) -> str:
+    """执行插件页面动作，返回 JSON 字符串。
+
+    成功::
+
+        {"ok": true, "refresh": bool, "data": {..}|null, "message": "..."}
+
+    ``refresh=true`` 表示界面应整页重新调用 ``plugin_page_load``；
+    ``data`` 为该模板的新 payload（可为 null）；``message`` 为状态文案。
+    插件未实现该页面动作钩子 → ``NOT_IMPLEMENTED``。
+    """
+    try:
+        from jml.host import pages
+
+        payload = _parse_json_object(payload_json, "动作参数")
+        return _dumps(pages.run_page_action(plugin_id, page_id, action_id, payload))
+    except Exception as exc:
+        return _failure(exc)
+
+
+def plugin_page_image(plugin_id: str, page_id: str, index: int) -> bytes | None:
+    """取插件页面图片原图 bytes（唯一非 JSON 入口之一）。
+
+    失败（插件未加载 / 页面未声明 / 未注册图片钩子 / 解析器抛异常 /
+    返回值不是 bytes）一律返回 ``None``，同时写诊断；C# 侧显示图片占位。
+    """
+    try:
+        from jml.host import pages
+
+        return pages.fetch_page_image(plugin_id, page_id, index)
+    except Exception:  # pragma: no cover - fetch_page_image 内部已收口
+        return None
 
 
 # ---------------------------------------------------------------------------

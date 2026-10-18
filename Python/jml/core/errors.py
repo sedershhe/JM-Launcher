@@ -115,6 +115,12 @@ class ArchiveError(AppError):
     error_code = ERROR_ARCHIVE_INVALID
 
 
+class InvalidDataError(AppError):
+    """数据/协议形状不合法（如插件页面钩子返回的不是 dict）。"""
+
+    error_code = ERROR_INVALID_DATA
+
+
 class ImageError(AppError):
     """图片内容或像素无效。"""
 

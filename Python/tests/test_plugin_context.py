@@ -44,6 +44,9 @@ def _make_context(services: dict[tuple[str, int], object]) -> PluginContext:
         on_get_service=on_get_service,
         on_config_get=lambda key: None,
         on_log=lambda message: None,
+        on_register_page=lambda page_id, loader: None,
+        on_register_page_action=lambda page_id, action_id, handler: None,
+        on_register_page_image=lambda page_id, resolver: None,
     )
 
 
@@ -97,6 +100,9 @@ def test_call_service_wraps_host_lookup_error_as_service_error():
         on_get_service=boom,
         on_config_get=lambda key: None,
         on_log=lambda message: None,
+        on_register_page=lambda page_id, loader: None,
+        on_register_page_action=lambda page_id, action_id, handler: None,
+        on_register_page_image=lambda page_id, resolver: None,
     )
 
     with pytest.raises(ServiceError):
@@ -120,5 +126,8 @@ def test_context_does_not_expose_host_objects():
         "get_service",
         "call_service",
         "config_get",
+        "register_page",
+        "register_page_action",
+        "register_page_image",
         "log",
     }

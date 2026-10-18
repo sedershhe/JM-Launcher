@@ -446,6 +446,9 @@ def test_plugin_search_session_isolated_from_main():
         on_get_service=on_get_service,
         on_config_get=lambda key: None,
         on_log=lambda message: None,
+        on_register_page=lambda page_id, loader: None,
+        on_register_page_action=lambda page_id, action_id, handler: None,
+        on_register_page_image=lambda page_id, resolver: None,
     )
 
     plugin_first = ctx.call_service(

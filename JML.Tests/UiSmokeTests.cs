@@ -70,6 +70,39 @@ public class UiSmokeTests
     }
 
     /// <summary>
+    /// 在 UI 线程上执行一段异步断言并等它完成（假网关返回已完成的 Task，
+    /// 续体由常驻 Dispatcher 循环处理，测试线程只等完成信号）。
+    /// </summary>
+    internal static void RunOnUiThreadAsync(Func<Task> action)
+    {
+        Exception? failure = null;
+        using var done = new ManualResetEventSlim(false);
+
+        UiDispatcher.Value.BeginInvoke(new Action(async () =>
+        {
+            try
+            {
+                await action();
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            finally
+            {
+                done.Set();
+            }
+        }));
+
+        Assert.True(done.Wait(TimeSpan.FromSeconds(60)), "界面线程异步执行超时。");
+
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
     /// 启动 STA 线程、创建唯一的 Application 并加载主题资源，然后把 Dispatcher 交回测试线程。
     /// </summary>
     private static Dispatcher CreateUiThread()

@@ -1,0 +1,874 @@
+using System.Globalization;
+using System.IO;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Media.Imaging;
+using JML.Bridge;
+using JML.Bridge.Dto;
+using JML.Infrastructure;
+
+namespace JML.Pages;
+
+/// <summary>
+/// 插件结构化页面宿主（技术方案第三节方案 A）：按 <c>template</c> 渲染
+/// list / browser / action 三种模板，**不含任何业务逻辑**。
+///
+/// 数据纪律：
+/// <list type="bullet">
+/// <item>模板类型、标题来自 Python（manifest 决定），未知模板只显示错误；</item>
+/// <item>列定义 / 行数据 / 文件清单 / 状态文案 / 动作按钮 / 失败判断全部来自 Python；</item>
+/// <item>图片走 <c>plugin_page_image</c> 取原始 bytes，<see cref="BitmapImage"/>
+/// 只在 UI 线程创建（旧缺陷 #7）；</item>
+/// <item>失败只显示 <c>[error_code] error_message</c>，不弹全局框、不抛异常。</item>
+/// </list>
+///
+/// 顶部「← 返回 + 页面名」由 MainWindow 的内页标题栏负责，本页只管内容区。
+/// </summary>
+public partial class PluginPageHost : UserControl
+{
+    private readonly IPluginPageGateway _gateway;
+    private readonly List<PluginPageFileItemDto> _fileItems = [];
+    private readonly List<PluginPageFileItemDto> _actionItems = [];
+
+    private bool _loadedOnce;
+    private string _template = "";
+    private string _title = "";
+
+    // list 模板分页状态
+    private int _listPage = 1;
+    private int _listTotalPages = 1;
+
+    // browser 模板状态
+    private int _filePage = 1;
+    private int _fileTotalPages = 1;
+    private int _itemIndex = -1;
+    private int _imageIndex;
+    private int _imageCount;
+    private bool _viewingImage;
+    private bool _goingBackToList;
+
+    /// <summary>本页所属插件 id（由 MainWindow 传入）。</summary>
+    public string PluginId { get; }
+
+    /// <summary>本页的 manifest 页面 id（由 MainWindow 传入）。</summary>
+    public string PageId { get; }
+
+    /// <summary>页面标题（优先取 Python 返回的 manifest 标题）。</summary>
+    public string PageTitle { get; private set; }
+
+    /// <summary>设计器 / 默认为空页（未传 plugin_id/page_id 时不发任何调用）。</summary>
+    public PluginPageHost()
+        : this(string.Empty, string.Empty, string.Empty, null)
+    {
+    }
+
+    /// <summary>按插件 + 页面构造宿主（生产入口）。</summary>
+    public PluginPageHost(string pluginId, string pageId, string title)
+        : this(pluginId, pageId, title, null)
+    {
+    }
+
+    /// <summary>按插件 + 页面构造宿主；<paramref name="gateway"/> 仅测试注入假实现。</summary>
+    internal PluginPageHost(
+        string pluginId,
+        string pageId,
+        string title,
+        IPluginPageGateway? gateway)
+    {
+        PluginId = pluginId ?? string.Empty;
+        PageId = pageId ?? string.Empty;
+        PageTitle = title ?? string.Empty;
+        _gateway = gateway ?? PluginPageGateway.Instance;
+
+        InitializeComponent();
+
+        Loaded += async (_, _) =>
+        {
+            if (_loadedOnce)
+            {
+                return;
+            }
+
+            _loadedOnce = true;
+            await LoadAsync(1);
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // 载入 / 刷新
+    // ------------------------------------------------------------------
+
+    /// <summary>载入指定列表页（list/browser 共用 page 参数；action 忽略页码）。</summary>
+    public async Task LoadAsync(int page)
+    {
+        if (string.IsNullOrWhiteSpace(PluginId) || string.IsNullOrWhiteSpace(PageId))
+        {
+            TextError.Text = "插件页面缺少 plugin_id / page_id，无法载入。";
+            TextError.Visibility = Visibility.Visible;
+            return;
+        }
+
+        try
+        {
+            int requested = page < 1 ? 1 : page;
+            var parameters = new Dictionary<string, object?>
+            {
+                ["page"] = requested,
+            };
+            ShowStatus("正在加载页面…");
+            PluginPageLoadResultDto result =
+                await _gateway.LoadAsync(PluginId, PageId, parameters);
+            ApplyLoad(result);
+            if (result.Ok)
+            {
+                ClearStatus();
+            }
+
+            if (result.Ok && string.Equals(result.Template, "browser", StringComparison.Ordinal)
+                && _viewingImage)
+            {
+                await LoadImageAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            // 网关已收口；这里兜底，保证页面不因宿主异常崩掉。
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// 按一次 <c>plugin_page_load</c> 的结果重建界面（内部可见：STA 测试直接喂 DTO）。
+    /// </summary>
+    internal void ApplyLoad(PluginPageLoadResultDto? result)
+    {
+        if (result is null)
+        {
+            ShowError("UNKNOWN_ERROR", "插件页面返回为空");
+            return;
+        }
+
+        if (!result.Ok)
+        {
+            ShowError(result.ErrorCode, result.ErrorMessage);
+            return;
+        }
+
+        ClearError();
+        _template = result.Template ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(result.Title))
+        {
+            _title = result.Title;
+            PageTitle = result.Title;
+        }
+
+        switch (_template)
+        {
+            case "list":
+                RenderList(result.Data);
+                break;
+            case "browser":
+                RenderBrowser(result.Data);
+                break;
+            case "action":
+                RenderAction(result.Data);
+                break;
+            case "form":
+                // 方案 A 的 form 模板由设置页 / 账号窗负责渲染，功能页不重复实现。
+                ShowError(
+                    "NOT_IMPLEMENTED",
+                    "form 模板由设置与账号界面渲染，插件功能页暂不渲染该模板");
+                break;
+            default:
+                ShowError("INVALID_DATA", $"插件返回了未知页面模板: {_template}");
+                break;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // list 模板
+    // ------------------------------------------------------------------
+
+    private void RenderList(JsonElement data)
+    {
+        PluginListPageDto? page = PluginPageData.ToList(data);
+        if (page is null)
+        {
+            ShowError("INVALID_DATA", "list 模板数据不是 JSON 对象");
+            return;
+        }
+
+        ShowOnly(PanelList);
+
+        _listPage = page.Page > 0 ? page.Page : 1;
+        _listTotalPages = ResolveTotalPages(
+            page.TotalPages, page.Total, page.PageSize, page.Rows.Count);
+        TextListPage.Text = $"第 {_listPage} 页 / 共 {_listTotalPages} 页";
+        BtnListPrev.IsEnabled = _listPage > 1;
+        BtnListNext.IsEnabled = _listPage < _listTotalPages;
+
+        BuildListColumns(page);
+
+        bool empty = page.Rows.Count == 0;
+        GridRows.ItemsSource = page.Rows
+            .Select((row, index) => new PluginRowView(row, index))
+            .ToList();
+        TextListEmpty.Text = string.IsNullOrWhiteSpace(page.EmptyText)
+            ? "暂无数据"
+            : page.EmptyText;
+        TextListEmpty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+        GridRows.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+        PanelListPager.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void BuildListColumns(PluginListPageDto page)
+    {
+        GridRows.Columns.Clear();
+
+        foreach (PluginPageColumnDto column in page.Columns)
+        {
+            if (string.IsNullOrEmpty(column.Key))
+            {
+                continue;
+            }
+
+            var textColumn = new DataGridTextColumn
+            {
+                Header = string.IsNullOrWhiteSpace(column.Title) ? column.Key : column.Title,
+                IsReadOnly = true,
+                Binding = new Binding($"[{column.Key}]")
+                {
+                    Mode = BindingMode.OneWay,
+                    Converter = JsonElementDisplayConverter.Instance,
+                },
+            };
+
+            textColumn.Width = column.Width is > 0
+                ? new DataGridLength(column.Width.Value)
+                : DataGridLength.Auto;
+            GridRows.Columns.Add(textColumn);
+        }
+
+        foreach (PluginPageRowActionDto action in page.RowActions)
+        {
+            AddRowActionColumn(action);
+        }
+    }
+
+    /// <summary>
+    /// 行操作列：每行同一组按钮，点击时把该行原始 JSON 回传给 Python
+    /// （C# 不解释行字段，也不做可见性判断）。
+    /// </summary>
+    private void AddRowActionColumn(PluginPageRowActionDto action)
+    {
+        var panel = new FrameworkElementFactory(typeof(StackPanel));
+        panel.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+
+        var button = new FrameworkElementFactory(typeof(Button));
+        button.SetValue(
+            FrameworkElement.StyleProperty,
+            FindResource(action.Primary ? "PrimaryButton" : "SecondaryButton"));
+        button.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 0, 0, 0));
+        button.SetValue(FrameworkElement.HeightProperty, 26.0);
+        button.SetValue(Button.MinWidthProperty, 56.0);
+        button.SetValue(ContentControl.ContentProperty, action.Title);
+        button.SetValue(FrameworkElement.TagProperty, action.Id);
+        button.AddHandler(Button.ClickEvent, new RoutedEventHandler(OnRowActionClick));
+
+        panel.AppendChild(button);
+        GridRows.Columns.Add(new DataGridTemplateColumn
+        {
+            Header = string.Empty,
+            CellTemplate = new DataTemplate { VisualTree = panel },
+            Width = DataGridLength.Auto,
+        });
+    }
+
+    private async void OnRowActionClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element)
+        {
+            return;
+        }
+
+        string actionId = element.Tag as string ?? string.Empty;
+        PluginRowView? row = element.DataContext as PluginRowView;
+        var payload = new Dictionary<string, object?>
+        {
+            ["row"] = row?.Row,
+            ["row_index"] = row?.Index ?? -1,
+            ["page"] = _listPage,
+        };
+
+        await RunActionAsync(actionId, payload);
+    }
+
+    private void BtnListPrev_Click(object sender, RoutedEventArgs e)
+    {
+        _ = LoadAsync(_listPage - 1);
+    }
+
+    private void BtnListNext_Click(object sender, RoutedEventArgs e)
+    {
+        _ = LoadAsync(_listPage + 1);
+    }
+
+    // ------------------------------------------------------------------
+    // browser 模板
+    // ------------------------------------------------------------------
+
+    private void RenderBrowser(JsonElement data)
+    {
+        PluginBrowserPageDto? page = PluginPageData.ToBrowser(data);
+        if (page is null)
+        {
+            ShowError("INVALID_DATA", "browser 模板数据不是 JSON 对象");
+            return;
+        }
+
+        ShowOnly(PanelBrowser);
+
+        _fileItems.Clear();
+        _fileItems.AddRange(page.Items);
+        BrowserFileList.ItemsSource = _fileItems.Select(item => item.Name).ToList();
+
+        _filePage = page.Page > 0 ? page.Page : 1;
+        _fileTotalPages = ResolveTotalPages(
+            page.TotalPages, page.Total, page.PageSize, _fileItems.Count);
+        TextFilePage.Text = $"第 {_filePage} 页 / 共 {_fileTotalPages} 页";
+        BtnFilePrev.IsEnabled = _filePage > 1;
+        BtnFileNext.IsEnabled = _filePage < _fileTotalPages;
+
+        bool listEmpty = _fileItems.Count == 0;
+        TextBrowserEmpty.Text = string.IsNullOrWhiteSpace(page.EmptyText)
+            ? "暂无文件"
+            : page.EmptyText;
+        TextBrowserEmpty.Visibility = listEmpty
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        PanelFilePager.Visibility = listEmpty
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+
+        _itemIndex = page.ItemIndex;
+        _imageIndex = page.ImageIndex > 0 ? page.ImageIndex : 0;
+        _imageCount = page.ImageCount > 0 ? page.ImageCount : 0;
+        _viewingImage = _itemIndex >= 0 && _itemIndex < _fileItems.Count;
+
+        BrowserFileList.SelectedIndex = _viewingImage ? _itemIndex : -1;
+
+        PanelImageBar.Visibility = _viewingImage
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        ImagePage.Source = null;
+        ImagePage.Visibility = Visibility.Collapsed;
+
+        if (_viewingImage)
+        {
+            UpdateImagePager();
+            TextImageHint.Text = "正在加载图片…";
+            TextImageHint.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            TextImagePage.Text = string.Empty;
+            TextImageHint.Text = listEmpty
+                ? string.Empty
+                : "双击左侧文件查看内容";
+            TextImageHint.Visibility = listEmpty
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
+    }
+
+    private void UpdateImagePager()
+    {
+        TextImagePage.Text = $"第 {_imageIndex + 1} 页 / 共 {_imageCount} 页";
+        BtnImagePrev.IsEnabled = _imageIndex > 0;
+        BtnImageNext.IsEnabled = _imageCount > 0 && _imageIndex + 1 < _imageCount;
+    }
+
+    /// <summary>打开文件列表中的某个条目（index = -1 表示回到列表）。</summary>
+    internal async Task LoadBrowserItemAsync(int itemIndex, int imageIndex = 0)
+    {
+        try
+        {
+            var parameters = new Dictionary<string, object?>
+            {
+                ["page"] = _filePage,
+                ["item_index"] = itemIndex,
+                ["image_index"] = imageIndex,
+            };
+            ShowStatus("正在加载页面…");
+            PluginPageLoadResultDto result =
+                await _gateway.LoadAsync(PluginId, PageId, parameters);
+            ApplyLoad(result);
+            if (result.Ok)
+            {
+                ClearStatus();
+            }
+
+            if (result.Ok && _viewingImage)
+            {
+                await LoadImageAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+        }
+    }
+
+    /// <summary>按当前 image_index 取图片并交给 UI 线程渲染。</summary>
+    internal async Task LoadImageAsync()
+    {
+        if (!_viewingImage)
+        {
+            return;
+        }
+
+        TextImageHint.Text = "正在加载图片…";
+        TextImageHint.Visibility = Visibility.Visible;
+
+        byte[]? bytes;
+        try
+        {
+            bytes = await _gateway.ImageAsync(PluginId, PageId, _imageIndex);
+        }
+        catch (Exception ex)
+        {
+            BridgeFailures.Log("获取插件页面图片", ex);
+            bytes = null;
+        }
+
+        // 回 UI 线程后创建 BitmapImage：工作线程只产出 bytes（旧缺陷 #7）。
+        ApplyImage(bytes);
+    }
+
+    /// <summary>把原始图片字节渲染到界面（内部可见：STA 测试直接喂 bytes）。</summary>
+    internal void ApplyImage(byte[]? bytes)
+    {
+        if (bytes is null || bytes.Length == 0)
+        {
+            ImagePage.Source = null;
+            ImagePage.Visibility = Visibility.Collapsed;
+            TextImageHint.Text = "图片加载失败";
+            TextImageHint.Visibility = Visibility.Visible;
+            return;
+        }
+
+        try
+        {
+            var bitmap = new BitmapImage();
+            using (var stream = new MemoryStream(bytes, writable: false))
+            {
+                bitmap.BeginInit();
+                bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.StreamSource = stream;
+                bitmap.EndInit();
+            }
+
+            bitmap.Freeze();
+            ImagePage.Source = bitmap;
+            ImagePage.Visibility = Visibility.Visible;
+            TextImageHint.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            ImagePage.Source = null;
+            ImagePage.Visibility = Visibility.Collapsed;
+            TextImageHint.Text = "图片加载失败";
+            TextImageHint.Visibility = Visibility.Visible;
+            LogSanitizer.Log(
+                $"插件页面图片解码失败：{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private async void BrowserFileList_MouseDoubleClick(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        int index = BrowserFileList.SelectedIndex;
+        if (index < 0)
+        {
+            return;
+        }
+
+        await LoadBrowserItemAsync(index);
+    }
+
+    private async void BtnBrowserBack_Click(object sender, RoutedEventArgs e)
+    {
+        await BackToFileListAsync();
+    }
+
+    /// <summary>从图片视图回到文件列表（按钮与 Esc 共用）。</summary>
+    internal async Task BackToFileListAsync()
+    {
+        if (!IsViewingImage || _goingBackToList)
+        {
+            return;
+        }
+
+        _goingBackToList = true;
+        try
+        {
+            await LoadBrowserItemAsync(-1);
+        }
+        finally
+        {
+            _goingBackToList = false;
+        }
+    }
+
+    /// <summary>当前是否停在 browser 的图片视图（Esc 返回列表的判定条件）。</summary>
+    internal bool IsViewingImage =>
+        PanelBrowser.Visibility == Visibility.Visible && _viewingImage;
+
+    /// <summary>
+    /// Esc 语义（计划书 4.6「返回列表（返回按钮或 Esc）」）：
+    /// 只在图片视图里拦截；其余情况返回 false，不影响上层内页返回逻辑。
+    /// MainWindow 的窗口级 Esc 也会调用本方法，保证焦点不在本页时仍然有效。
+    /// </summary>
+    public bool TryHandleEscape()
+    {
+        if (!IsViewingImage)
+        {
+            return false;
+        }
+
+        _ = BackToFileListAsync();
+        return true;
+    }
+
+    private void BtnImagePrev_Click(object sender, RoutedEventArgs e)
+    {
+        if (_imageIndex <= 0)
+        {
+            return;
+        }
+
+        _imageIndex--;
+        UpdateImagePager();
+        _ = LoadImageAsync();
+    }
+
+    private void BtnImageNext_Click(object sender, RoutedEventArgs e)
+    {
+        if (_imageCount <= 0 || _imageIndex + 1 >= _imageCount)
+        {
+            return;
+        }
+
+        _imageIndex++;
+        UpdateImagePager();
+        _ = LoadImageAsync();
+    }
+
+    private void BtnFilePrev_Click(object sender, RoutedEventArgs e)
+    {
+        _ = LoadAsync(_filePage - 1);
+    }
+
+    private void BtnFileNext_Click(object sender, RoutedEventArgs e)
+    {
+        _ = LoadAsync(_filePage + 1);
+    }
+
+    private void Host_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape)
+        {
+            return;
+        }
+
+        // 图片视图里 Esc = 返回文件列表（计划书 4.6）；不在图片视图时不拦截，
+        // 让上层（MainWindow）的内页返回逻辑自行处理。
+        if (TryHandleEscape())
+        {
+            e.Handled = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // action 模板
+    // ------------------------------------------------------------------
+
+    private void RenderAction(JsonElement data)
+    {
+        PluginActionPageDto? page = PluginPageData.ToAction(data);
+        if (page is null)
+        {
+            ShowError("INVALID_DATA", "action 模板数据不是 JSON 对象");
+            return;
+        }
+
+        ShowOnly(PanelAction);
+
+        _actionItems.Clear();
+        _actionItems.AddRange(page.Items);
+        ActionFileList.ItemsSource = _actionItems.Select(item => item.Name).ToList();
+
+        bool empty = _actionItems.Count == 0;
+        TextActionEmpty.Text = string.IsNullOrWhiteSpace(page.EmptyText)
+            ? "暂无文件"
+            : page.EmptyText;
+        TextActionEmpty.Visibility = empty
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        PanelActionButtons.Children.Clear();
+        foreach (PluginPageActionDto action in page.Actions)
+        {
+            var button = new Button
+            {
+                Content = action.Title,
+                Style = (Style)FindResource("SecondaryButton"),
+                MinWidth = 76,
+                Margin = new Thickness(0, 0, 8, 0),
+                Tag = action.Id,
+            };
+            button.Click += OnActionButtonClick;
+            PanelActionButtons.Children.Add(button);
+        }
+
+        TextActionStatus.Text = BuildActionStatusText(page);
+    }
+
+    /// <summary>状态文案来自 Python；port 只做展示（0 表示未启动）。</summary>
+    private static string BuildActionStatusText(PluginActionPageDto page)
+    {
+        if (!string.IsNullOrWhiteSpace(page.StatusText))
+        {
+            return page.StatusText;
+        }
+
+        return page.Port > 0 ? $"服务端口：{page.Port}" : page.State;
+    }
+
+    private async void OnActionButtonClick(object sender, RoutedEventArgs e)
+    {
+        string actionId = (sender as FrameworkElement)?.Tag as string ?? string.Empty;
+        int selected = ActionFileList.SelectedIndex;
+        Dictionary<string, object?>? item = null;
+        if (selected >= 0 && selected < _actionItems.Count)
+        {
+            item = new Dictionary<string, object?>
+            {
+                ["name"] = _actionItems[selected].Name,
+                ["path"] = _actionItems[selected].Path,
+            };
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["item"] = item,
+            ["item_index"] = selected,
+        };
+        await RunActionAsync(actionId, payload);
+    }
+
+    private void BtnActionRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        _ = LoadAsync(1);
+    }
+
+    // ------------------------------------------------------------------
+    // 动作结果
+    // ------------------------------------------------------------------
+
+    private async Task RunActionAsync(
+        string actionId,
+        Dictionary<string, object?> payload)
+    {
+        if (string.IsNullOrWhiteSpace(actionId))
+        {
+            return;
+        }
+
+        try
+        {
+            PluginPageActionResultDto result =
+                await _gateway.ActionAsync(PluginId, PageId, actionId, payload);
+            await ApplyActionResultAsync(result);
+        }
+        catch (Exception ex)
+        {
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// 处理 <c>plugin_page_action</c> 返回：失败显示 <c>[error_code] message</c>；
+    /// 成功时展示 message，并按 refresh/data 决定整页重载还是就地换数据。
+    /// </summary>
+    internal async Task ApplyActionResultAsync(PluginPageActionResultDto? result)
+    {
+        if (result is null)
+        {
+            ShowError("UNKNOWN_ERROR", "插件页面动作返回为空");
+            return;
+        }
+
+        if (!result.Ok)
+        {
+            ShowError(result.ErrorCode, result.ErrorMessage);
+            return;
+        }
+
+        ClearError();
+        if (!string.IsNullOrWhiteSpace(result.Message))
+        {
+            ShowStatus(result.Message);
+            if (PanelAction.Visibility == Visibility.Visible)
+            {
+                TextActionStatus.Text = result.Message;
+            }
+        }
+
+        if (result.Refresh)
+        {
+            await LoadAsync(_template == "browser" ? _filePage : _listPage);
+            return;
+        }
+
+        if (result.Data is { } data && PluginPageData.IsObject(data))
+        {
+            ApplyLoad(new PluginPageLoadResultDto
+            {
+                Ok = true,
+                Template = _template,
+                Title = _title,
+                Data = data,
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 通用
+    // ------------------------------------------------------------------
+
+    /// <summary>列表总页数：优先用 Python 给的 total_pages，否则按 total/page_size 推算。</summary>
+    private static int ResolveTotalPages(
+        int totalPages,
+        int total,
+        int pageSize,
+        int loadedCount)
+    {
+        if (totalPages > 0)
+        {
+            return totalPages;
+        }
+
+        int size = pageSize > 0 ? pageSize : loadedCount;
+        if (total > 0 && size > 0)
+        {
+            return Math.Max(1, (int)Math.Ceiling(total / (double)size));
+        }
+
+        return 1;
+    }
+
+    private void ShowOnly(FrameworkElement panel)
+    {
+        PanelList.Visibility = ReferenceEquals(panel, PanelList)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        PanelBrowser.Visibility = ReferenceEquals(panel, PanelBrowser)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        PanelAction.Visibility = ReferenceEquals(panel, PanelAction)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    internal void ShowError(string? errorCode, string? errorMessage)
+    {
+        string code = string.IsNullOrWhiteSpace(errorCode) ? "UNKNOWN_ERROR" : errorCode;
+        TextError.Text =
+            $"[{LogSanitizer.Sanitize(code)}] {LogSanitizer.Sanitize(errorMessage ?? "")}";
+        TextError.Visibility = Visibility.Visible;
+        TextStatus.Visibility = Visibility.Collapsed;
+    }
+
+    private void ClearError()
+    {
+        TextError.Text = string.Empty;
+        TextError.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowStatus(string message)
+    {
+        TextStatus.Text = message;
+        TextStatus.Visibility = string.IsNullOrWhiteSpace(message)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private void ClearStatus()
+    {
+        TextStatus.Text = string.Empty;
+        TextStatus.Visibility = Visibility.Collapsed;
+    }
+}
+
+/// <summary>
+/// 行数据视图：DataGrid 的绑定源。保留插件原始行（<see cref="Row"/>）供动作
+/// 回传，展示时用索引器取值（列 key 由 Python 决定）。
+/// </summary>
+internal sealed class PluginRowView
+{
+    public PluginRowView(Dictionary<string, JsonElement> row, int index)
+    {
+        Row = row;
+        Index = index;
+    }
+
+    /// <summary>插件原始行（回传给 plugin_page_action 的 row 字段）。</summary>
+    public Dictionary<string, JsonElement> Row { get; }
+
+    /// <summary>行下标（0 起）。</summary>
+    public int Index { get; }
+
+    /// <summary>供 WPF 绑定 <c>[key]</c> 使用；缺字段返回 Undefined（显示空串）。</summary>
+    public JsonElement this[string key] =>
+        Row.TryGetValue(key, out JsonElement value) ? value : default;
+}
+
+/// <summary>任意 JSON 标量 → 展示文本（不排序、不改写业务字段）。</summary>
+internal sealed class JsonElementDisplayConverter : IValueConverter
+{
+    public static JsonElementDisplayConverter Instance { get; } = new();
+
+    public object Convert(
+        object? value,
+        Type targetType,
+        object? parameter,
+        CultureInfo culture)
+    {
+        if (value is not JsonElement element)
+        {
+            return value?.ToString() ?? string.Empty;
+        }
+
+        return element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString() ?? string.Empty,
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.Null or JsonValueKind.Undefined => string.Empty,
+            _ => element.GetRawText(),
+        };
+    }
+
+    public object ConvertBack(
+        object? value,
+        Type targetType,
+        object? parameter,
+        CultureInfo culture) =>
+        throw new NotSupportedException("插件页面行数据为只读。");
+}

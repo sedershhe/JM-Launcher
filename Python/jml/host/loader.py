@@ -31,6 +31,7 @@ from jml.core.protocol import (
     PluginError,
 )
 from jml import events
+from jml.host import pages
 from jml.host.manifest import load_manifest
 from jml.host.plugin_context import PluginContext
 from jml.host.registry import REGISTRY
@@ -126,6 +127,8 @@ def load_all(plugins_dir: str) -> dict:
         _LOADED_MANIFESTS.clear()
     with _CONFIG_STORES_LOCK:
         _CONFIG_STORES.clear()
+    # 页面钩子同样作废：重新装配后必须由插件重新注册（避免旧闭包残留）
+    pages.reset()
 
     loaded: list[dict] = []
     failed: list[dict] = []
@@ -142,9 +145,12 @@ def load_all(plugins_dir: str) -> dict:
             _load_single(manifest)
         except PluginError as exc:
             # 插件体系错误：记录后继续装下一个（先加载的不受后面失败影响）
+            # setup 中途注册过的页面钩子一并撤销，不留半装状态
+            pages.PAGE_REGISTRY.clear_plugin(plugin_id)
             failed.append({"id": plugin_id, "reason": str(exc)})
             continue
         except Exception as exc:  # setup 内任意异常：同样只标记该插件失败
+            pages.PAGE_REGISTRY.clear_plugin(plugin_id)
             failed.append(
                 {"id": plugin_id, "reason": f"setup 执行失败: {type(exc).__name__}: {exc}"}
             )
@@ -219,6 +225,10 @@ def _build_context(manifest: dict) -> PluginContext:
     """为插件构造 PluginContext（回调全部闭包转发，插件摸不到宿主对象）。"""
     plugin_id = manifest["id"]
     config_store = _get_or_create_config(manifest)
+    #: 本插件 manifest 声明过的页面 id（页面注册的唯一合法集合）
+    declared_pages = {
+        page["id"] for page in manifest["pages"] if isinstance(page.get("id"), str)
+    }
 
     def on_register_service(name: str, version: int, ref: object) -> None:
         REGISTRY.register_service(name, version, ref)
@@ -237,6 +247,38 @@ def _build_context(manifest: dict) -> PluginContext:
         # 后续接主日志通道时替换这里，接口不变）
         print(f"[plugin:{plugin_id}] {message}")
 
+    # -- 结构化页面协议：plugin_id 由闭包绑定，插件无法指定别人的 id ------
+
+    def _require_declared(page_id: str) -> str:
+        """页面 id 必须在该插件 manifest 的 pages[] 里（否则装配失败）。"""
+        if not isinstance(page_id, str) or not page_id:
+            raise pages.PageError(f"插件 {plugin_id} 的页面 id 必须是非空字符串")
+        if page_id not in declared_pages:
+            raise pages.PageError(
+                f"插件 {plugin_id} 的页面 {page_id} 未在 manifest 的 pages[] 中声明，"
+                "拒绝注册（插件不能注册未声明或别人的页面）"
+            )
+        return page_id
+
+    def on_register_page(page_id: str, loader_fn) -> None:
+        pages.PAGE_REGISTRY.register_loader(
+            plugin_id, _require_declared(page_id), loader_fn
+        )
+
+    def on_register_page_action(page_id: str, action_id: str, handler) -> None:
+        if not isinstance(action_id, str) or not action_id:
+            raise pages.PageError(
+                f"插件 {plugin_id} 的页面动作 id 必须是非空字符串"
+            )
+        pages.PAGE_REGISTRY.register_action(
+            plugin_id, _require_declared(page_id), action_id, handler
+        )
+
+    def on_register_page_image(page_id: str, resolver) -> None:
+        pages.PAGE_REGISTRY.register_image(
+            plugin_id, _require_declared(page_id), resolver
+        )
+
     return PluginContext(
         plugin_id,
         on_register_service=on_register_service,
@@ -244,6 +286,9 @@ def _build_context(manifest: dict) -> PluginContext:
         on_get_service=on_get_service,
         on_config_get=on_config_get,
         on_log=on_log,
+        on_register_page=on_register_page,
+        on_register_page_action=on_register_page_action,
+        on_register_page_image=on_register_page_image,
     )
 
 
@@ -319,3 +364,5 @@ def reset() -> None:
         _CONFIG_STORES.clear()
     with _LOADED_LOCK:
         _LOADED_MANIFESTS.clear()
+    # 页面钩子注册表随装配状态一起清空（插件重新装配后由插件重新注册）
+    pages.reset()

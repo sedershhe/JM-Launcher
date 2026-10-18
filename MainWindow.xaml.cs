@@ -796,6 +796,12 @@ public partial class MainWindow : Window
     private object? _currentContent;
     private string? _currentInnerPageId;
 
+    /// <summary>
+    /// 内页 page_id → 所属插件 id。NavigationStack 只保存 (pageId, title)，
+    /// 页面渲染需要 plugin_id 才能调 plugin_page_load；这里在 PushInner 时登记。
+    /// </summary>
+    private readonly Dictionary<string, string> _innerPluginIds = new();
+
     // ---- 自绘缩放状态（PCL2 MyResizer 的等价实现）----
     private ResizeEdge _resizeEdge = ResizeEdge.None;
     private Rect _resizeStartRect;
@@ -830,6 +836,10 @@ public partial class MainWindow : Window
         _nav.MainChanged += OnMainChanged;
         _nav.InnerChanged += OnInnerChanged;
         _pluginHubPage.FeatureRequested += OnFeatureRequested;
+
+        // 插件 browser 页面：图片视图里按 Esc 返回文件列表（计划书 4.6）。
+        // 焦点不在插件页时也要生效，所以在窗口级 PreviewKeyDown 处理。
+        PreviewKeyDown += OnWindowPreviewKeyDown;
 
         // 搜索页的行内「详情」「下载」由主窗口协调。
         _searchPage.DownloadRequested += OnSearchDownloadRequested;
@@ -1146,9 +1156,30 @@ public partial class MainWindow : Window
         _nav.PopInner();
     }
 
-    /// <summary>插件功能页双击：进入内页（阶段 1 为占位页）。</summary>
+    /// <summary>
+    /// 窗口级 Esc：当前内页是插件 browser 且停在图片视图时，返回该页的文件列表
+    /// （计划书 4.6）；其余情况不拦截，保持原有交互。
+    /// </summary>
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape)
+        {
+            return;
+        }
+
+        if (_currentContent is PluginPageHost host && host.TryHandleEscape())
+        {
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// 插件功能列表双击：登记 page_id → plugin_id，再进入内页。
+    /// 内页内容由 PluginPageHost 按 Python 返回的 template 渲染。
+    /// </summary>
     private void OnFeatureRequested(object? sender, PluginFeaturesView.FeatureItem item)
     {
+        _innerPluginIds[item.PageId] = item.PluginId;
         _nav.PushInner(item.PageId, item.PageTitle);
     }
 
@@ -1245,7 +1276,7 @@ public partial class MainWindow : Window
     /// <summary>
     /// 根据导航状态刷新顶部标题栏与内容区。
     /// 内页时：隐藏主导航（PCL2 的 PanTitleMain），显示「← 返回 + 页面名」，
-    /// 内容区为插件功能占位页。
+    /// 内容区为插件功能页（PluginPageHost 按 template 渲染）。
     /// 一级页与内页共用同一套切换动画（PageTransition + 标题栏镜像）。
     /// </summary>
     private void UpdateContent()
@@ -1264,16 +1295,18 @@ public partial class MainWindow : Window
             title = inner.Value.Title;
 
             // Navigate 会先触发 MainChanged 再触发 InnerChanged（两次 UpdateContent），
-            // 同一内页复用同一个占位页实例，避免第二次调用把入场动画重播一遍。
-            if (_currentInnerPageId == inner.Value.PageId && _currentContent is PluginPagePlaceholder reusable)
+            // 同一内页复用同一个渲染页实例，避免第二次调用把入场动画重播一遍、
+            // 也避免重复发 plugin_page_load。
+            if (_currentInnerPageId == inner.Value.PageId && _currentContent is PluginPageHost reusable)
             {
                 content = reusable;
             }
             else
             {
-                var placeholder = new PluginPagePlaceholder();
-                placeholder.SetContent(inner.Value.Title);
-                content = placeholder;
+                string pluginId = _innerPluginIds.TryGetValue(inner.Value.PageId, out string? pid)
+                    ? pid
+                    : string.Empty;
+                content = new PluginPageHost(pluginId, inner.Value.PageId, inner.Value.Title);
             }
 
             _currentInnerPageId = inner.Value.PageId;
