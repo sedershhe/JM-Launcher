@@ -8,7 +8,11 @@ using JML.Infrastructure;
 namespace JML.Pages;
 
 /// <summary>
-/// 插件功能视图（阶段 4）：列出已加载且未禁用插件；双击进入该插件的功能页。
+/// 插件功能视图（阶段 4）：列出已加载插件；双击进入该插件的功能页。
+///
+/// 启用/停用真源：Python 侧 <c>%APPDATA%/JML/plugins/disabled.json</c>。
+/// bootstrap 返回的 loaded 已排除停用插件，本视图**不读**
+/// <c>AppSettings.DisabledPlugins</c>，也不在 C# 侧重复过滤。
 ///
 /// 多页面处理（契约《插件结构化页面协议》§12.4）：
 /// - 插件只声明 1 个页面 → 直接触发 <see cref="FeatureRequested"/>（pages[0]）；
@@ -72,7 +76,6 @@ public partial class PluginFeaturesView : UserControl
         }
 
         TextStatus.Text = "正在读取插件…";
-        List<string> disabled = AppSettings.Load().DisabledPlugins.ToList();
 
         Task.Run(() => PluginBridge.Bootstrap(pluginsDir))
             .ContinueWith(t =>
@@ -89,11 +92,6 @@ public partial class PluginFeaturesView : UserControl
                 _entries.Clear();
                 foreach (PluginInfoDto plugin in t.Result.Loaded)
                 {
-                    if (disabled.Contains(plugin.Id))
-                    {
-                        continue;
-                    }
-
                     _entries.Add(new PluginEntry(plugin.Id, plugin.Name, plugin.Pages));
                 }
 

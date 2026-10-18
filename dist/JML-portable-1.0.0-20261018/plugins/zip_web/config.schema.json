@@ -1,0 +1,7 @@
+{
+  "last_folder": {
+    "type": "string",
+    "default": "",
+    "label": "上次打开的文件夹"
+  }
+}

@@ -1,5 +1,6 @@
 using System.Windows;
 using JML.Bridge;
+using JML.Infrastructure;
 using PlainToolkit.UI;
 
 namespace JML;
@@ -14,6 +15,16 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // 阶段 5：无界面自检。命中 --selfcheck 时只跑诊断、不创建主窗口。
+        // WPF 在 OnStartup 返回后才会按 StartupUri 创建窗口；这里同步 Shutdown，
+        // 启动流程在创建窗口前终止（实测进程约 2.4s 退出、MainWindowHandle 始终为 0）。
+        if (SelfCheck.IsRequested(e.Args))
+        {
+            int exitCode = SelfCheck.RunAndWrite();
+            Shutdown(exitCode);
+            return;
+        }
 
         // 初始化 PCL2 风格主题支持（必须在 UI 线程、在窗口创建前调用）
         // PCL2 只有浅色一套观感（ModSecret.vb 无暗色色板）：切浅色，

@@ -1,0 +1,22 @@
+{
+  "id": "favorites",
+  "name": "收藏夹",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "浏览当前登录账号的收藏夹：切换收藏夹目录与排序，每条可详情 / 下载（需要登录态）。",
+  "entry": "main.py",
+  "dependencies": {"plugins": []},
+  "services": {
+    "provides": [],
+    "requires": [{"name": "jm.session", "version": 1}]
+  },
+  "pages": [
+    {
+      "id": "favorites.main",
+      "title": "收藏夹",
+      "template": "list"
+    }
+  ],
+  "config": {"schema": "config.schema.json"},
+  "development_sample": false
+}

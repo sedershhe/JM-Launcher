@@ -1,0 +1,22 @@
+{
+  "id": "zip_browser",
+  "name": "ZIP 浏览",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "选择文件夹列出 ZIP，直接在包内翻页看图（不解压落盘），并对外提供 archive_reader/1 压缩包读取服务。",
+  "entry": "main.py",
+  "dependencies": {"plugins": []},
+  "services": {
+    "provides": [{"name": "archive_reader", "version": 1}],
+    "requires": []
+  },
+  "pages": [
+    {
+      "id": "zip_browser.main",
+      "title": "ZIP 浏览",
+      "template": "browser"
+    }
+  ],
+  "config": {"schema": "config.schema.json"},
+  "development_sample": false
+}

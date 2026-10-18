@@ -9,6 +9,15 @@
     <RootNamespace>JML</RootNamespace>
     <AssemblyName>JML</AssemblyName>
 
+    <!-- 程序图标与文件元信息（阶段 5）：图标沿用 PCL2 icon.ico（用户已确认开源可沿用） -->
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <AssemblyTitle>JM Launcher</AssemblyTitle>
+    <Product>JM Launcher</Product>
+    <Company>JML</Company>
+    <Description>JM Launcher — 禁漫下载/搜索/浏览工具</Description>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+
     <!-- 默认编译项排除临时/证据目录：按项目规则，Draw\ 与 Delete\ 专门存放临时文件与
          验收证据，而 MSBuild 的默认 glob 不看 .gitignore。子代理在 Draw\ 或 Delete\ 下留过
          临时 C# 工程时，其 obj\...AssemblyInfo.cs 会被卷进主项目，报 CS0579 特性重复。
@@ -28,8 +37,31 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 将 Python 后端代码随输出目录分发，便于运行时定位 -->
-    <None Include="Python\**\*.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 窗口图标作为 WPF 资源嵌入程序集：MainWindow.xaml 的 Icon 指向它。 -->
+    <Resource Include="Assets\icon.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 将 Python 后端代码随输出目录分发，便于运行时定位。
+         阶段 5：同时声明 CopyToPublishDirectory，保证 dotnet publish 的发布态
+         不需要依赖脚本二次拷贝也能带上 Python 源码。 -->
+    <None Include="Python\**\*.py"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <!-- 四个内置插件随构建/发布输出（排除 __pycache__ 与 .pyc：这些是运行期产物） -->
+    <None Include="plugins\**\*.py"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="plugins\**\plugin.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="plugins\**\config.schema.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <!-- 用户安装 Python 依赖用 -->
+    <None Include="requirements.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- 排除测试项目目录：否则主项目会把测试的 .cs 也编译进去，

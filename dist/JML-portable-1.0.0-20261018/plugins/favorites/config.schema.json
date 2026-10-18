@@ -1,0 +1,13 @@
+{
+  "last_folder_id": {
+    "type": "string",
+    "default": "",
+    "label": "上次打开的收藏夹"
+  },
+  "sort": {
+    "type": "string",
+    "default": "mr",
+    "enum": ["mr", "mp", "mv"],
+    "label": "排序"
+  }
+}
