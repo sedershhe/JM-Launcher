@@ -1529,6 +1529,88 @@ public class PluginPageTests
         });
     }
 
+    // ------------------------------------------------------------------
+    // action 连点/双击：同一时刻只执行一个动作（zip_web 的 start 会换端口，
+    // 第二次 start 会把刚显示、刚打开的地址停掉）
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void Host_ActionDoubleClick_RunsOnlyOneActionAndDisablesButtons()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway
+            {
+                ActionGate = new TaskCompletionSource(),
+                ActionResult = ActionResultWithUrl("http://127.0.0.1:51234/"),
+            };
+            var host = NewHost(gateway);
+            host.BrowserOpener = _ => true;
+            host.ApplyLoad(ActionResult(
+                state: "running",
+                statusText: "正在浏览：http://127.0.0.1:51234/",
+                actionCount: 1,
+                itemCount: 1,
+                port: 51234,
+                url: "http://127.0.0.1:51234/"));
+
+            var actionButton =
+                (Button)Find<StackPanel>(host, "PanelActionButtons").Children[0];
+
+            // 真实用户的连点 / 双击
+            actionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            actionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            await WaitUntilAsync(() => gateway.ActionCalls.Count >= 1);
+            Assert.Single(gateway.ActionCalls);
+            Assert.False(actionButton.IsEnabled);
+
+            gateway.ActionGate!.SetResult();
+            await WaitUntilAsync(() => gateway.ActionCalls.Count == 1 &&
+                ((Button)Find<StackPanel>(host, "PanelActionButtons").Children[0]).IsEnabled);
+
+            // 动作结束后按钮恢复可用，且仍然只发过一次动作
+            Assert.Single(gateway.ActionCalls);
+        });
+    }
+
+    /// <summary>
+    /// 自动唤起只打开**页面当前渲染**的地址：动作返回的旧地址若已被重载后的页面
+    /// 顶替（换包/重复 start 会关掉旧端口），绝不打开那个死地址。
+    /// </summary>
+    [Fact]
+    public void Host_ActionUrlSupersededByReload_OpensRenderedUrlOnly()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            gateway.PendingLoads.Enqueue(ActionResult(
+                state: "running",
+                statusText: "正在浏览：http://127.0.0.1:60002/",
+                actionCount: 1,
+                itemCount: 1,
+                port: 60002,
+                url: "http://127.0.0.1:60002/"));
+            var host = NewHost(gateway);
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            var opened = new List<string>();
+            host.BrowserOpener = url =>
+            {
+                opened.Add(url);
+                return true;
+            };
+
+            // 动作返回的地址（60001）在重载后已不是页面显示的地址（60002）
+            await host.ApplyActionResultAsync(
+                ActionResultWithUrl("http://127.0.0.1:60001/", refresh: true));
+
+            Assert.Equal(new[] { "http://127.0.0.1:60002/" }, opened);
+            Assert.Equal("http://127.0.0.1:60002/", host.CurrentActionUrl);
+        });
+    }
+
     [Fact]
     public void Host_ActionFolderChoice_ShowsButtonAndReloadsWithFolder()
     {
@@ -1932,6 +2014,12 @@ public class PluginPageTests
 
         public PluginPageActionResultDto? ActionResult { get; set; }
 
+        /// <summary>
+        /// 可选：动作返回前先等这个信号（验证"动作未完成时不响应第二次点击"）。
+        /// 为 null 时立即返回 <see cref="ActionResult"/>。
+        /// </summary>
+        public TaskCompletionSource? ActionGate { get; set; }
+
         public List<string> ActionCalls { get; } = [];
 
         public Task<PluginPageLoadResultDto> LoadAsync(
@@ -1960,7 +2048,20 @@ public class PluginPageTests
             IReadOnlyDictionary<string, object?>? payload)
         {
             ActionCalls.Add(actionId + ":" + PluginPageBridge.SerializeParameters(payload));
-            return Task.FromResult(ActionResult ?? new PluginPageActionResultDto { Ok = true });
+            PluginPageActionResultDto result =
+                ActionResult ?? new PluginPageActionResultDto { Ok = true };
+            if (ActionGate is { } gate)
+            {
+                return CompleteAfterAsync(gate.Task, result);
+            }
+
+            return Task.FromResult(result);
+        }
+
+        private static async Task<T> CompleteAfterAsync<T>(Task gate, T value)
+        {
+            await gate;
+            return value;
         }
 
         public Task<byte[]?> ImageAsync(string pluginId, string pageId, int index)

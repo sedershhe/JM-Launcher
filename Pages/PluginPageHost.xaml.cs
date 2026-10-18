@@ -80,6 +80,10 @@ public partial class PluginPageHost : UserControl
     // 失败（或页面已不再指向该 url）时清空，允许用户重试。
     private string _autoOpenedUrl = string.Empty;
 
+    // 动作是否正在执行：同一时刻只允许一个动作（防连点/双击把刚起的服务换掉端口，
+    // 让界面上刚显示的地址变成死地址）。
+    private bool _actionInFlight;
+
     /// <summary>本页所属插件 id（由 MainWindow 传入）。</summary>
     public string PluginId { get; }
 
@@ -1256,21 +1260,20 @@ public partial class PluginPageHost : UserControl
     }
 
     /// <summary>
-    /// 动作成功返回 <c>data.url</c>（http/https 绝对地址）时自动唤起一次浏览器。
-    /// 只由动作结果触发：页面刷新 / 重新渲染同一 url 不会再次弹浏览器。
+    /// 动作成功后自动唤起浏览器：只打开**当前页面已渲染**的网址
+    /// （<see cref="_actionUrl"/>），而不是动作返回里可能已被后续动作顶替的旧地址
+    /// ——换包/重复 start 会关闭旧端口，打开旧地址只会得到"无法访问"的标签页。
+    /// 页面刷新 / 重新渲染同一 url 不会再次弹浏览器。
     /// </summary>
-    private void TryAutoOpenActionUrl(JsonElement? data)
+    private void TryAutoOpenRenderedUrl()
     {
         if (!string.Equals(_template, "action", StringComparison.Ordinal)
-            || data is not { } element
-            || element.ValueKind != JsonValueKind.Object
-            || !TryReadJsonString(element, "url", out string url)
-            || !IsHttpUrl(url))
+            || string.IsNullOrEmpty(_actionUrl))
         {
             return;
         }
 
-        OpenBrowser(url, userInitiated: false);
+        OpenBrowser(_actionUrl, userInitiated: false);
     }
 
     /// <summary>
@@ -1342,6 +1345,15 @@ public partial class PluginPageHost : UserControl
             return;
         }
 
+        // 单飞：动作执行期间忽略后续点击。zip_web 的 start 会重建服务端口，
+        // 连点时第二次 start 会把第一次刚显示/刚打开的地址停掉。
+        if (_actionInFlight)
+        {
+            return;
+        }
+
+        _actionInFlight = true;
+        SetActionButtonsEnabled(false);
         try
         {
             PluginPageActionResultDto result =
@@ -1351,6 +1363,23 @@ public partial class PluginPageHost : UserControl
         catch (Exception ex)
         {
             ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+        }
+        finally
+        {
+            _actionInFlight = false;
+            SetActionButtonsEnabled(true);
+        }
+    }
+
+    /// <summary>动作执行期间禁用/恢复动作按钮（按钮由 RenderAction 每次重建）。</summary>
+    private void SetActionButtonsEnabled(bool enabled)
+    {
+        foreach (object child in PanelActionButtons.Children)
+        {
+            if (child is System.Windows.Controls.Button button)
+            {
+                button.IsEnabled = enabled;
+            }
         }
     }
 
@@ -1393,7 +1422,7 @@ public partial class PluginPageHost : UserControl
         {
             await LoadAsync(_template == "browser" ? _filePage : _listPage);
             // 重载会清掉临时错误，自动唤起放在重载之后，失败文案才不会被覆盖。
-            TryAutoOpenActionUrl(result.Data);
+            TryAutoOpenRenderedUrl();
             return;
         }
 
@@ -1408,8 +1437,8 @@ public partial class PluginPageHost : UserControl
             });
         }
 
-        // 动作成功且 data.url 是 http(s) 绝对地址 → 自动唤起一次浏览器。
-        TryAutoOpenActionUrl(result.Data);
+        // 动作成功且页面当前渲染出 http(s) 绝对地址 → 自动唤起一次浏览器。
+        TryAutoOpenRenderedUrl();
     }
 
     /// <summary>

@@ -25,6 +25,7 @@ import os
 import shutil
 import socket
 import sys
+import urllib.error
 import urllib.request
 
 import pytest
@@ -407,16 +408,22 @@ def test_http_page_and_images_then_stop_releases_port(installed):
     assert "第 1 页 / 共 3 页" in html_text
     assert html_text.count("<img ") == 3
     for index in range(3):
-        assert f'src="/img/{index}"' in html_text
+        # 原版路由 /page/<序号>；每张图懒加载（大包不一次性拉全部）
+        assert f'src="/page/{index}"' in html_text
+        assert 'loading="lazy"' in html_text
     assert "position: fixed" in html_text
 
     # 三张原图：Pillow 解码成功，尺寸与 fixture 一致，Content-Type 正确
     expected_sizes = [(40, 30), (60, 50), (80, 70)]
     for index, expected in enumerate(expected_sizes):
-        image_status, image_headers, image_body = fetch(data["url"] + f"img/{index}")
+        image_status, image_headers, image_body = fetch(data["url"] + f"page/{index}")
         assert image_status == 200
         assert image_headers.get_content_type() == "image/png"
         assert decode_size(image_body) == expected
+        # /img/<序号> 是兼容别名，两种地址拿到同样的字节
+        alias_status, _alias_headers, alias_body = fetch(data["url"] + f"img/{index}")
+        assert alias_status == 200
+        assert alias_body == image_body
 
     # stop：refresh=true + 新 payload；之后端口必须已释放
     stopped = run_action("stop", {})
@@ -555,11 +562,17 @@ def test_build_page_html_is_seamless_vertical_long_page():
     assert "第 1 页 / 共 3 页" in page
     assert page.count("<img ") == 3
     for index in range(3):
-        assert f'src="/img/{index}"' in page
+        # 原版 web_viewer.py 的图片路由是 /page/<序号>
+        assert f'src="/page/{index}"' in page
+        assert 'loading="lazy"' in page
+        assert 'decoding="async"' in page
     # 所有图片在同一个长页容器里（不是分页/iframe），页码条固定
     assert '<div id="pages">' in page
     assert "position: fixed" in page
     assert "addEventListener('scroll'" in page
+    # 无缝：图片块级、无外边距/内边距、容器 line-height:0（原版 README 的四层成因）
+    assert "margin: 0 auto; padding: 0" in page
+    assert "line-height: 0" in page
     # 没有任何图片被 base64 内联
     assert "base64" not in page
 
@@ -574,3 +587,169 @@ def test_content_type_mapping():
     assert unit.content_type_for("a.webp") == "image/webp"
     assert unit.content_type_for("a.bmp") == "image/bmp"
     assert unit.content_type_for("a.txt") == "application/octet-stream"
+
+
+# ---------------------------------------------------------------------------
+# 生命周期：页面刷新 / 翻页 / 同包重复 start 都不得停服务
+# ---------------------------------------------------------------------------
+
+
+def test_page_reload_keeps_service_reachable(installed):
+    """模拟 C# 在 refresh=true 之后的整页重载（再次 plugin_page_load）。
+
+    C# 重载时会带上当前 folder（PluginPageHost.AddFolderParameter）；旧缺陷若在
+    loader 里把服务停掉，这里 GET / 就会连接失败——用户"手动粘贴端口打不开"
+    正是这个形态。
+    """
+    data, _payload = _start_fixture_browsing()
+    port = int(data["port"])
+    assert fetch(data["url"])[0] == 200
+
+    # 与 C# 重载同样的参数（page + folder）
+    reloaded = load_page(page=1, folder=_FIXTURE_DIR)["data"]
+    assert reloaded["state"] == "running"
+    assert reloaded["url"] == data["url"]
+    assert reloaded["port"] == port
+
+    status, headers, body = fetch(data["url"])
+    assert status == 200
+    assert headers.get_content_type() == "text/html"
+    assert "第 1 页 / 共 3 页" in body.decode("utf-8")
+    assert fetch(data["url"] + "page/0")[0] == 200
+
+    run_action("stop", {})
+
+
+def test_page_turn_keeps_service_reachable(installed):
+    """翻页（page=2）只是页面参数，不允许影响正在跑的服务。"""
+    data, _payload = _start_fixture_browsing()
+    port = int(data["port"])
+
+    turned = load_page(page=2, folder=_FIXTURE_DIR)["data"]
+    assert turned["state"] == "running"
+    assert turned["port"] == port
+    assert fetch(data["url"])[0] == 200
+
+    run_action("stop", {})
+
+
+def test_repeat_start_same_package_reuses_running_port(installed):
+    """同一个包再次 start：复用正在运行的服务，不换端口、不中断浏览器页。"""
+    data, _payload = _start_fixture_browsing()
+    url, port = data["url"], int(data["port"])
+    assert fetch(url)[0] == 200
+
+    again = run_action(
+        "start",
+        {"item": {"name": "1.zip", "path": os.path.join(_FIXTURE_DIR, "1.zip")}},
+    )
+    assert again["ok"] is True
+    assert again["refresh"] is True
+    assert again["data"]["url"] == url
+    assert int(again["data"]["port"]) == port
+    assert "已在运行" in again["message"]
+    # 端口没换、服务没断：同一地址仍然能拿到页面
+    assert fetch(url)[0] == 200
+
+    run_action("stop", {})
+
+
+# ---------------------------------------------------------------------------
+# 路由与文案：逐字对齐原版 web_viewer.py / zip_archive.py / plugin.py
+# ---------------------------------------------------------------------------
+
+
+def test_original_routes_and_error_texts(installed):
+    data, _payload = _start_fixture_browsing()
+    url = data["url"]
+
+    # /index.html 与 / 等价（原版 web_viewer.py:90）
+    assert fetch(url + "index.html")[0] == 200
+    # 未知路由 → 404「未找到该资源」（原版 web_viewer.py:97）
+    with pytest.raises(urllib.error.HTTPError) as missing:
+        fetch(url + "no-such-route")
+    assert missing.value.code == 404
+    assert missing.value.read().decode("utf-8") == "未找到该资源"
+    # 页码非整数 → 400「页码必须是整数」（原版 web_viewer.py:143）
+    with pytest.raises(urllib.error.HTTPError) as bad:
+        fetch(url + "page/abc")
+    assert bad.value.code == 400
+    assert bad.value.read().decode("utf-8") == "页码必须是整数"
+    # 越界 → 404「页码超出范围」（原版 web_viewer.py:157）
+    with pytest.raises(urllib.error.HTTPError) as out:
+        fetch(url + "page/999")
+    assert out.value.code == 404
+    assert out.value.read().decode("utf-8") == "页码超出范围"
+
+    run_action("stop", {})
+
+
+def test_head_request_has_no_body(installed):
+    data, _payload = _start_fixture_browsing()
+    request = urllib.request.Request(data["url"], method="HEAD")
+    with _OPENER.open(request, timeout=5) as response:
+        assert response.status == 200
+        assert response.read() == b""
+
+    run_action("stop", {})
+
+
+def test_closed_archive_is_reopened_when_serving_images(installed):
+    """另一个插件把同一个压缩包 close() 后，看图不能整页 500。"""
+    data, _payload = _start_fixture_browsing()
+    module = plugin_module()
+    # 取当前真正持有服务的会话（多次装配时 _SESSIONS 里可能有历史会话）
+    session = next(s for s in module._SESSIONS if s._server is not None)
+    reader = session._reader
+    reader.close(os.path.join(_FIXTURE_DIR, "1.zip"))
+    assert reader.is_open(os.path.join(_FIXTURE_DIR, "1.zip")) is False
+
+    status, headers, body = fetch(data["url"] + "page/0")
+    assert status == 200
+    assert headers.get_content_type() == "image/png"
+    assert decode_size(body) == (40, 30)
+
+    run_action("stop", {})
+
+
+def test_start_failure_message_matches_original_prefix(installed, monkeypatch):
+    """服务起不来时文案对齐原版「无法启动本地服务: …」并附端口/异常。"""
+    listing = load_page(folder=_FIXTURE_DIR)["data"]
+    item = next(item for item in listing["items"] if item["name"] == "1.zip")
+
+    class _BoomServer:
+        def __init__(self, *_args, **_kwargs):
+            raise OSError(10048, "通常每个套接字地址只允许使用一次。")
+
+    monkeypatch.setattr(plugin_module(), "ZipWebServer", _BoomServer)
+    result = run_action("start", {"item": item, "item_index": 0})
+
+    assert result["ok"] is True
+    assert result["refresh"] is False
+    assert result["data"] is None
+    assert result["message"].startswith("无法启动本地服务：")
+    assert "OSError" in result["message"]
+    assert load_page()["data"]["state"] == "idle"
+
+
+def test_no_images_message_matches_original(installed):
+    no_images = os.path.join(_FIXTURE_DIR, "no_images.zip")
+    if not os.path.isfile(no_images):
+        pytest.skip("缺少离线测试数据 Draw/zip-fixture/no_images.zip")
+    load_page(folder=_FIXTURE_DIR)
+
+    result = run_action(
+        "start",
+        {"item": {"name": "no_images.zip", "path": no_images}, "item_index": 0},
+    )
+    assert result["ok"] is True
+    assert result["refresh"] is False
+    # 原版 zip_archive.py:183 逐字（由 archive_reader/1 的 zip_browser 提供）
+    assert result["message"] == "压缩包中没有可浏览的图片"
+
+
+def test_start_without_selection_uses_original_hint(installed):
+    load_page(folder=_FIXTURE_DIR)
+    result = run_action("start", {"item": None, "item_index": -1})
+    # 原版 plugin.py:36 逐字
+    assert result["message"] == "请先选择一个压缩包"

@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import threading
 
+from jml.core import archive
+
 #: Windows 文件名禁用字符（计划书 11.6 逐字锁定）
 INVALID_FILENAME_CHARS = '\\/*?:"<>|'
 
@@ -113,3 +115,8 @@ def reserve_archive_path(directory: str, filename: str) -> str:
             except FileExistsError:
                 # 极端情况下被外部进程抢先创建：重新选名，绝不覆盖
                 continue
+            except OSError as exc:
+                # 权限/占用类失败：带上路径、errno/winerror、目录与占用判断
+                if archive.is_write_permission_failure(exc):
+                    raise archive.ArtifactWriteError(path, exc) from exc
+                raise

@@ -20,10 +20,17 @@
     也不探测插件目录；服务缺失由 loader 依据 manifest ``requires`` 拒绝加载
     （错误消息含"缺少服务 archive_reader"），本插件 setup 再做一次防御性校验。
 
-HTTP 纪律：
+HTTP 纪律（路由与文案对齐原版 ``plugins/zip_web/web_viewer.py``）：
     - 只绑 ``127.0.0.1``，端口传 **0** 由系统分配（不监听 0.0.0.0）；
-    - ``/`` 返回长页 HTML，``/img/<index>`` 返回 ``read_image`` 原始字节与正确
-      Content-Type；不把图片 base64 塞进 HTML / JSON；
+    - ``/``（含 ``/index.html``）返回长页 HTML，``/page/<index>`` 返回
+      ``read_image`` 原始字节与正确 Content-Type（``/img/<index>`` 保留为兼容别名）；
+      不把图片 base64 塞进 HTML / JSON；
+    - 未知路由 404「未找到该资源」、页码非整数 400「页码必须是整数」、
+      读图失败 500「读取第 N 页失败: 类型: 消息」（原版 web_viewer.py:97/143/153）；
+    - 启动后用本机回环**自检一次** ``GET /``：拿不到 200 就换端口重试，仍失败
+      则返回「无法启动本地服务：…（端口/异常）」而不是把死地址交给界面；
+    - 同一个压缩包重复 ``start`` **复用**正在运行的服务（不换端口、不中断已打开
+      的浏览器页）；换包/换目录才重建；
     - ``stop`` 后端口可立即重新绑定；页面 HTML 不写临时文件、不解压到磁盘。
 
 清理钩子：宿主当前没有 on_unload 钩子，``setup(ctx)`` 的返回值也不会被调用，
@@ -63,6 +70,25 @@ STATUS_STOPPED = "已停止"
 FOLDER_HINT_TEXT = "选择文件夹…"
 EMPTY_FOLDER_TEXT = "文件夹不存在，请重新选择"
 EMPTY_ZIP_TEXT = "目录中没有 ZIP 压缩包"
+
+#: 未选压缩包就点「用浏览器阅读」的提示（原版 plugin.py:36 逐字）
+HINT_PICK_ONE = "请先选择一个压缩包"
+
+#: HTTP 错误文案（逐字对齐原版 web_viewer.py）
+HTTP_NOT_FOUND_TEXT = "未找到该资源"          # web_viewer.py:97
+HTTP_BAD_INDEX_TEXT = "页码必须是整数"        # web_viewer.py:143
+HTTP_PAGE_OUT_OF_RANGE_TEXT = "页码超出范围"  # web_viewer.py:157
+#: 服务起不来时的前缀（原版 web_viewer.py:288「无法启动本地服务: {last_error}」，
+#: 这里用全角冒号并附带端口与异常类型，便于用户直接判断是哪一步失败）
+SERVER_START_FAILED_PREFIX = "无法启动本地服务："
+#: 启动自检失败后换端口重试的次数（含首次）
+SERVER_START_ATTEMPTS = 3
+#: 启动自检单次超时（秒）：本机回环，正常 10ms 内返回
+SERVER_PROBE_TIMEOUT = 3.0
+
+#: 单页图片路由（原版 web_viewer.py 的 ``/page/<序号>``；``/img/`` 为兼容别名）
+_IMAGE_ROUTE_PREFIX = "/page/"
+_IMAGE_ROUTE_ALIAS = "/img/"
 
 #: 视为可浏览图片的条目后缀（与 archive_reader 的判定一致；仅用于 Content-Type）
 _IMAGE_CONTENT_TYPES = {
@@ -127,7 +153,12 @@ def content_type_for(entry_name: str) -> str:
 def build_page_html(title: str, image_count: int) -> str:
     """生成无缝纵向连续阅读页面（所有图片在一个长页里，顶部固定页码条）。
 
-    - 图片地址 ``/img/<index>``（index 0 起），原图 bytes 由服务提供；
+    - 图片地址 ``/page/<index>``（index 0 起，原版 web_viewer.py 的同名路由），
+      原图 bytes 由服务提供；``/img/<index>`` 保留为兼容别名；
+    - 每张图带 ``loading="lazy"`` + ``decoding="async"``（原版 index_page.py 的
+      懒加载做法）：几百页的长包不会在打开页面时一次性请求全部图片；
+    - 图片之间**零间距**（原版卖点）：块级 + 无 margin/padding/gap，
+      容器 ``line-height: 0`` 兜底，浏览器等比缩放；
     - 顶部固定条初始文案**逐字**为「第 1 页 / 共 N 页」，滚动时用简单 JS
       按当前视口锚点更新（只改页码，不改变图片布局）；
     - 全部内容由本函数拼出，不写临时文件。
@@ -135,8 +166,8 @@ def build_page_html(title: str, image_count: int) -> str:
     total = max(0, int(image_count))
     safe_title = html.escape(title or "ZIP 网页浏览", quote=True)
     images = "\n".join(
-        f'<img src="/img/{index}" data-index="{index}" '
-        f'alt="第 {index + 1} 页">'
+        f'<img src="/page/{index}" data-index="{index}" '
+        f'loading="lazy" decoding="async" alt="第 {index + 1} 页">'
         for index in range(total)
     )
     return f"""<!DOCTYPE html>
@@ -153,10 +184,11 @@ def build_page_html(title: str, image_count: int) -> str:
     background: rgba(0, 0, 0, 0.72); color: #fff;
     font: 14px/1.4 "Microsoft YaHei", sans-serif; text-align: center;
   }}
-  #pages {{ padding-top: 48px; }}
+  #pages {{ padding-top: 48px; line-height: 0; }}
   #pages img {{
     display: block; width: 100%; max-width: 1000px; height: auto;
-    margin: 0 auto 8px; background: #fff;
+    margin: 0 auto; padding: 0; border: 0; vertical-align: top;
+    background: #fff;
   }}
 </style>
 </head>
@@ -217,20 +249,39 @@ def _same_path(left: str, right: str) -> bool:
 
 
 class _ZipWebHandler(BaseHTTPRequestHandler):
-    """只读 HTTP 处理器：``/`` 长页 HTML，``/img/<index>`` 图片原始字节。"""
+    """只读 HTTP 处理器：``/`` 长页 HTML，``/page/<index>`` 图片原始字节。
+
+    路由与错误文案对齐原版 ``web_viewer.py``：``/`` 或 ``/index.html`` 出页面，
+    ``/page/<序号>`` 出图片（``/img/<序号>`` 是 JML 早期版本的兼容别名）。
+    """
 
     server_version = "JMLZipWeb/1.0"
     sys_version = ""
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
+        self._head_only = False
+        self._handle()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._head_only = True
+        self._handle()
+
+    def _handle(self) -> None:
         try:
             path = urlsplit(self.path).path
-            if path in ("", "/"):
+            if path in ("", "/", "/index.html"):
                 self._send_html()
-            elif path.startswith("/img/"):
-                self._send_image(path[len("/img/") :])
+            elif path.startswith(_IMAGE_ROUTE_PREFIX) or path.startswith(
+                _IMAGE_ROUTE_ALIAS
+            ):
+                prefix = (
+                    _IMAGE_ROUTE_PREFIX
+                    if path.startswith(_IMAGE_ROUTE_PREFIX)
+                    else _IMAGE_ROUTE_ALIAS
+                )
+                self._send_image(path[len(prefix) :])
             else:
-                self._send_text(404, "Not Found")
+                self._send_text(404, HTTP_NOT_FOUND_TEXT)
         except Exception:
             # 读图失败 / 客户端提前断开：尽量回 500，绝不把异常抛给宿主线程
             try:
@@ -246,23 +297,34 @@ class _ZipWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if not self._head_only:
+            self.wfile.write(body)
 
     def _send_image(self, raw_index: str) -> None:
         server = self.server
         index = _as_index(raw_index)
-        if index is None or not 0 <= index < len(server.entries):
-            self._send_text(404, "Not Found")
+        if index is None:
+            self._send_text(400, HTTP_BAD_INDEX_TEXT)
             return
-        data = server.reader.read_image(server.zip_path, index)
-        payload = bytes(data)
-        entry_name = server.entries[index]
+        if not 0 <= index < len(server.entries):
+            self._send_text(404, HTTP_PAGE_OUT_OF_RANGE_TEXT)
+            return
+        try:
+            payload, entry_name = server.read_image_bytes(index)
+        except Exception as exc:
+            # 原版 web_viewer.py:153 的同形文案，带页码与异常类型，便于用户报告
+            self._send_text(
+                500,
+                f"读取第 {index} 页失败: {type(exc).__name__}: {exc}",
+            )
+            return
         self.send_response(200)
         self.send_header("Content-Type", content_type_for(entry_name))
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(payload)
+        if not self._head_only:
+            self.wfile.write(payload)
 
     def _send_text(self, code: int, text: str) -> None:
         body = (text or "").encode("utf-8")
@@ -270,17 +332,24 @@ class _ZipWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(body)
 
     def log_message(self, format: str, *args: object) -> None:
         """静默访问日志（宿主 stdout 只保留插件自己的状态日志）。"""
 
 
 class ZipWebServer(ThreadingHTTPServer):
-    """本机回环只读服务器（端口 0 = 系统自动分配，只绑 127.0.0.1）。"""
+    """本机回环只读服务器（端口 0 = 系统自动分配，只绑 127.0.0.1）。
+
+    ``daemon_threads=True`` 与原版 ``web_viewer.py`` 的 ``ZipViewerServer`` 一致：
+    处理线程随进程结束，``server_close()`` 不会等待浏览器留下的空闲连接。
+    """
 
     #: 让停止后同端口可立即重新绑定（Windows/Linux 一致）
     allow_reuse_address = True
+    #: 请求处理线程为 daemon（原版同名设置），停止时不被浏览器空闲连接拖住
+    daemon_threads = True
 
     def __init__(self, reader, zip_path: str, entries: list[str], title: str) -> None:
         self.reader = reader
@@ -294,6 +363,21 @@ class ZipWebServer(ThreadingHTTPServer):
     def port(self) -> int:
         """实际监听端口（server_address 的第二项）。"""
         return int(self.server_address[1])
+
+    def read_image_bytes(self, index: int) -> tuple[bytes, str]:
+        """读取第 ``index`` 页的原始字节与条目名。
+
+        ZIP 浏览插件与本插件共用 ``archive_reader/1``：如果另一个插件把同一个
+        压缩包 ``close()`` 了，这里**自动重开一次**再读，避免浏览器里整页图片
+        全部变成 500。重开后条目数变了就抛错（由 handler 回 500 带原因）。
+        """
+
+        try:
+            data = self.reader.read_image(self.zip_path, index)
+        except Exception:
+            self.entries = list(self.reader.list_images(self.zip_path))
+            data = self.reader.read_image(self.zip_path, index)
+        return bytes(data), self.entries[index]
 
 
 # ---------------------------------------------------------------------------
@@ -386,15 +470,40 @@ class ZipWebSession:
     # -- 动作：start / stop --------------------------------------------------
 
     def handle_start(self, payload: dict) -> dict:
-        """启动本机回环 HTTP 服务（换包/重启前先释放旧服务与旧句柄）。"""
+        """启动本机回环 HTTP 服务（同包复用；换包/重启前先释放旧服务）。
+
+        生命周期与原版 ``plugins/zip_web/plugin.py`` 的 ``_open_worker`` 对齐：
+        - 页面加载 / 翻页 / 页面重载**不**动服务，只有 ``stop``、换包、换目录、
+          插件卸载（atexit）才停；
+        - 同一个压缩包再次 ``start`` 直接复用正在运行的服务（不换端口），
+          避免"刚给界面的端口被下一次点击停掉"这种假死；
+        - 新服务起来后先用本机回环 ``GET /`` 自检一次：拿不到 200 就换端口重试，
+          仍失败则回错误（带端口与异常），绝不把连不上的地址交给界面。
+        """
         with self._lock:
             path, name = self._resolve_selected_locked(payload)
             if not path:
                 return {
                     "refresh": False,
                     "data": None,
-                    "message": "请先在左侧选择要浏览的 ZIP 压缩包",
+                    "message": HINT_PICK_ONE,
                 }
+
+            # 同包重复 start：服务已在跑就原样返回当前地址（不换端口、不中断浏览器页）
+            if (
+                self._server is not None
+                and self._selected_path
+                and _same_path(path, self._selected_path)
+            ):
+                self._ctx.log(
+                    f"浏览服务已在运行：{self._url}（{self._selected_name}），复用"
+                )
+                return {
+                    "refresh": True,
+                    "data": self._payload_locked(),
+                    "message": f"浏览服务已在运行：{self._url}",
+                }
+
             try:
                 entries = list(self._reader.list_images(path))
             except Exception as exc:  # AppError 的文案已是逐字锁定的中文
@@ -402,39 +511,90 @@ class ZipWebSession:
                 return {"refresh": False, "data": None, "message": str(exc)}
 
             # 新包已通过校验：先停旧服务（同包复用句柄，不 close）
+            target_name = name or os.path.basename(path)
             self._stop_locked(keep_archive=path)
             self._stopped_text = ""
             self._selected_path = path
-            self._selected_name = name or os.path.basename(path)
+            self._selected_name = target_name
             self._entries = entries
 
-            try:
-                server = ZipWebServer(self._reader, path, entries, self._selected_name)
-            except OSError as exc:
-                self._release_selected_locked()
-                self._ctx.log(f"启动浏览服务失败：{type(exc).__name__}: {exc}")
-                return {
-                    "refresh": False,
-                    "data": None,
-                    "message": f"启动浏览服务失败：{exc}",
-                }
+            last_error: BaseException | None = None
+            last_port = 0
+            for _attempt in range(SERVER_START_ATTEMPTS):
+                try:
+                    server = ZipWebServer(self._reader, path, entries, target_name)
+                except OSError as exc:
+                    last_error = exc
+                    continue
 
-            thread = threading.Thread(
-                target=server.serve_forever,
-                name="zip-web-http",
-                daemon=True,
+                thread = threading.Thread(
+                    target=server.serve_forever,
+                    name="zip-web-http",
+                    daemon=True,
+                )
+                thread.start()
+                self._server = server
+                self._thread = thread
+                self._port = server.port
+                self._url = f"http://127.0.0.1:{self._port}/"
+                last_port = self._port
+
+                probe_error = self._probe_server_locked(self._url)
+                if probe_error is None:
+                    self._ctx.log(
+                        f"浏览服务已启动：{self._url}"
+                        f"（{self._selected_name}，共 {len(entries)} 页）"
+                    )
+                    return {
+                        "refresh": True,
+                        "data": self._payload_locked(),
+                        "message": f"浏览服务已启动：{self._url}",
+                    }
+
+                # 自检失败：这个端口拿不到页面，停掉换一个端口重试
+                last_error = probe_error
+                self._ctx.log(
+                    f"启动自检失败：{self._url} {type(probe_error).__name__}: "
+                    f"{probe_error}"
+                )
+                self._stop_locked(keep_archive=path)
+                # _stop_locked 会清空展示状态，重试前恢复本次选择
+                self._selected_path = path
+                self._selected_name = target_name
+                self._entries = entries
+
+            self._release_selected_locked()
+            detail = (
+                f"127.0.0.1:{last_port}（{type(last_error).__name__}: {last_error}）"
+                if last_port
+                else f"{type(last_error).__name__}: {last_error}"
             )
-            thread.start()
-            self._server = server
-            self._thread = thread
-            self._port = server.port
-            self._url = f"http://127.0.0.1:{self._port}/"
-            self._ctx.log(f"浏览服务已启动：{self._url}（{self._selected_name}）")
+            self._ctx.log(f"{SERVER_START_FAILED_PREFIX}{detail}")
             return {
-                "refresh": True,
-                "data": self._payload_locked(),
-                "message": f"浏览服务已启动：{self._url}",
+                "refresh": False,
+                "data": None,
+                "message": f"{SERVER_START_FAILED_PREFIX}{detail}",
             }
+
+    def _probe_server_locked(self, url: str) -> BaseException | None:
+        """启动自检：本机回环 GET 首页，成功返回 None，失败返回异常。
+
+        调用于 ``handle_start`` 内（持锁）。``urllib`` 的 socket I/O 会释放 GIL，
+        因此服务线程能真正跑起来响应这次请求——这正是"界面上的端口能不能被
+        浏览器打开"的最小验证（不读系统代理，只连本机回环）。
+        """
+        import urllib.request
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(url, timeout=SERVER_PROBE_TIMEOUT) as response:
+                status = int(getattr(response, "status", 0) or 0)
+                response.read()
+            if status != 200:
+                return OSError(f"首页返回 HTTP {status}")
+            return None
+        except BaseException as exc:  # noqa: BLE001 - 自检失败原因原样带回
+            return exc
 
     def handle_stop(self, payload: dict) -> dict:
         """停止 HTTP 服务并释放端口（幂等）。"""

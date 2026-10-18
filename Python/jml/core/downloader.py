@@ -10,6 +10,10 @@
 - 每本一个 ZIP，命名 ``{标题}-JM{编号}.zip``，同名走"副本"命名（决策 #1）；
   先写 ``.part``，校验通过后 ``os.replace``；失败/取消同时删除 ``.part``
   与 0 字节占位文件；
+- 批次开始前实测 ``target_dir`` 可写（``.jml-write-probe-<rand>.tmp`` 建/写/删）；
+  不可写立即失败且不登记批次，绝不白跑整本才发现权限不足；
+- ZIP/占位文件写入被拒时错误码仍 ``PERMISSION_DENIED``，但消息带绝对路径、
+  errno/winerror、目录可写复探与"同名文件可能被占用"判断，并补一条 error 级日志；
 - 打包后校验 ZIP（可打开 / 条目数 / 可解码 / 像素 / 零字节），
   不过关 → 删除半成品并判该本失败（功能计划书 4.1 质量保证）；
 - 事件：item_started / item_finished / log / batch_finished，payload 字段
@@ -35,6 +39,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from jml.core import archive, book_ids, diagnostics, jm_source, naming
 from jml.core.errors import (
     ERROR_CANCELLED,
+    ERROR_PERMISSION_DENIED,
     AppError,
     BatchNotFoundError,
     CancelledError,
@@ -90,6 +95,26 @@ class _ValidationFailed(AppError):
         super().__init__(message)
 
 
+class TargetDirectoryUnwritableError(AppError, PermissionError):
+    """下载目录实测不可写（fail fast）。
+
+    错误码固定 ``PERMISSION_DENIED``，消息由
+    :func:`jml.core.archive.describe_target_unwritable` 生成（绝对路径 +
+    异常类型 + errno/winerror + 换目录/检查安全软件提示）；同时是
+    ``PermissionError``，方便调用方按 ``OSError`` 兜底。
+    """
+
+    error_code = ERROR_PERMISSION_DENIED
+
+    def __init__(self, directory: str, exc: BaseException) -> None:
+        absolute = os.path.abspath(os.fspath(directory))
+        # 先走父类构造（OSError 会重置 errno/winerror），再补回结构化字段
+        super().__init__(archive.describe_target_unwritable(absolute, exc))
+        self.directory = absolute
+        self.errno = getattr(exc, "errno", None)
+        self.winerror = getattr(exc, "winerror", None)
+
+
 def _remove_quiet(path: str) -> None:
     """删除失败产物（只用于本模块自己创建的半成品/占位文件）。"""
     try:
@@ -101,6 +126,35 @@ def _remove_quiet(path: str) -> None:
 def _raise_if_cancelled(cancel_event: threading.Event) -> None:
     if cancel_event.is_set():
         raise CancelledError("下载已取消")
+
+
+def _ensure_target_dir_writable(directory: str) -> None:
+    """批次开始前实测下载目录可写（fail fast，绝不白跑整本才发现写不了）。
+
+    探针由 :func:`jml.core.archive.write_probe` 完成（建唯一临时文件 → 写入 →
+    删除，失败也清理）；不可写时抛 ``PermissionError``（错误码
+    ``PERMISSION_DENIED``），消息带绝对路径、异常类型与 errno/winerror。
+    """
+    try:
+        archive.write_probe(directory)
+    except OSError as exc:
+        error = TargetDirectoryUnwritableError(directory, exc)
+        diagnostics.record("TARGET_DIR_UNWRITABLE", str(error), exc)
+        raise error from exc
+
+
+def _log_artifact_write_failure(
+    batch_id: str, exc: archive.ArtifactWriteError
+) -> None:
+    """写产物失败时补一条可定位的 error 级下载日志（不含账号等敏感信息）。"""
+    errno_value = 0 if exc.errno is None else exc.errno
+    winerror_value = 0 if exc.winerror is None else exc.winerror
+    _emit_log(
+        batch_id,
+        LOG_ERROR,
+        f"写产物失败：{exc.path}（errno={errno_value}, winerror={winerror_value}）",
+        exc.error_code,
+    )
 
 
 def _safe_rmtree(path: str) -> None:
@@ -445,23 +499,36 @@ def _run_one_book(
             raise ImageError(f"本子 {book_id} 未获取到任何图片")
 
         filename = naming.build_archive_filename(title, book_id)
-        zip_path = naming.reserve_archive_path(target_dir, filename)
-        part_path = zip_path + ".part"
+        zip_path = ""
+        part_path = ""
         try:
-            # 先写 .part，校验通过后再原子替换到占位名；
-            # 任何失败/取消都删除 .part 与 0 字节占位文件。
-            entry_count, validation = archive.pack_and_validate(image_paths, part_path)
-            if not validation.ok:
-                raise _ValidationFailed(validation.error_code, validation.error_message)
-            if cancel_event.is_set():
-                raise CancelledError("下载已取消")
-            os.replace(part_path, zip_path)
-            if cancel_event.is_set():
+            zip_path = naming.reserve_archive_path(target_dir, filename)
+            part_path = zip_path + ".part"
+            try:
+                # 先写 .part，校验通过后再原子替换到占位名；
+                # 任何失败/取消都删除 .part 与 0 字节占位文件。
+                entry_count, validation = archive.pack_and_validate(image_paths, part_path)
+                if not validation.ok:
+                    raise _ValidationFailed(validation.error_code, validation.error_message)
+                if cancel_event.is_set():
+                    raise CancelledError("下载已取消")
+                try:
+                    os.replace(part_path, zip_path)
+                except OSError as exc:
+                    # 原子替换也可能被"同名文件被占用/权限"挡住：同样给可诊断文案
+                    if archive.is_write_permission_failure(exc):
+                        raise archive.ArtifactWriteError(zip_path, exc) from exc
+                    raise
+                if cancel_event.is_set():
+                    _remove_quiet(zip_path)
+                    raise CancelledError("下载已取消")
+            except BaseException:
+                _remove_quiet(part_path)
                 _remove_quiet(zip_path)
-                raise CancelledError("下载已取消")
-        except BaseException:
-            _remove_quiet(part_path)
-            _remove_quiet(zip_path)
+                raise
+        except archive.ArtifactWriteError as exc:
+            # 除错误码日志外补一条可定位的明细（download.log 由 C# sink 落盘）
+            _log_artifact_write_failure(batch_id, exc)
             raise
 
         _emit_log(batch_id, LOG_INFO, f"已保存: {zip_path}（{entry_count} 页）")
@@ -514,6 +581,7 @@ def run_batch(
     """
     identity = _normalize_or_raise(book_ids)
     directory = _normalize_target_dir(target_dir)
+    _ensure_target_dir_writable(directory)
     _cleanup_stale_artifacts(directory)
     base_work_dir = _prepare_work_base(directory, work_dir)
 
@@ -684,6 +752,8 @@ def start_batch(
     """
     identity = _normalize_or_raise(book_ids)
     directory = _normalize_target_dir(target_dir)
+    # fail fast：目录写不进去就立即失败，不登记批次、不取专辑/下载任何图片。
+    _ensure_target_dir_writable(directory)
 
     batch_id = uuid.uuid4().hex
     record = _BatchRecord(batch_id, identity, directory, work_dir)
