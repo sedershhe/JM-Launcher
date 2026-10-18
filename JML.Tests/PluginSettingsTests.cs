@@ -279,6 +279,41 @@ public class PluginSettingsTests
     }
 
     [Fact]
+    public void SettingsPage_IoError_ShowsActionableDataDirectoryHint()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var gateway = new FakePluginSettingsGateway
+            {
+                SetResult = new SetPluginSettingResultDto
+                {
+                    Ok = false,
+                    ErrorCode = "IO_ERROR",
+                    // 用户实测缺陷的原始形态：只有底层权限错误，没有“当前数据目录”
+                    ErrorMessage = "插件 settings_demo 的配置写入失败: config.json.tmp Permission denied",
+                },
+            };
+            var page = NewPage(gateway);
+            page.RenderPluginSettings(SampleDto());
+
+            PluginSettingEditor threads = Find(page, "threads");
+            var numberBox = Assert.IsType<TextBox>(threads.Editor);
+            numberBox.Text = "8";
+
+            page.CommitAllPluginSettingsAsync().GetAwaiter().GetResult();
+
+            Assert.Equal(Visibility.Visible, threads.ErrorText.Visibility);
+            // error_code 必须保留，便于用户/支持按错误码排查
+            Assert.Contains("[IO_ERROR]", threads.ErrorText.Text);
+            Assert.Contains("数据目录", threads.ErrorText.Text);
+            Assert.Contains("当前数据目录", threads.ErrorText.Text);
+            Assert.Contains(
+                JML.Infrastructure.AppPaths.DataDirectory,
+                threads.ErrorText.Text);
+        });
+    }
+
+    [Fact]
     public void SettingsPage_UnchangedFields_AreNotWritten()
     {
         UiSmokeTests.RunOnUiThread(() =>

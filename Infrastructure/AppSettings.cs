@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace JML.Infrastructure;
 
 /// <summary>
-/// 应用设置（%APPDATA%/JML/settings.json）。
+/// 应用设置（默认 %APPDATA%/JML/settings.json，跟随 <see cref="AppPaths.ConfigDirectory"/> 降级）。
 /// 读写失败一律回退默认值，绝不让设置文件问题弄崩主程序。
 /// 注意：本文件不存任何凭据（账号走 CredentialStore：Windows 凭据管理器 / DPAPI）。
 /// </summary>
@@ -28,8 +28,9 @@ public sealed class AppSettings
     {
         get
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            return Path.Combine(appData, "JML", "settings.json");
+            // 数据目录可能因首选根不可写而整体降级（见 AppPaths），
+            // settings.json 必须与其它配置一起跟随选定根，否则降级后设置会写不进去。
+            return Path.Combine(AppPaths.ConfigDirectory, "settings.json");
         }
     }
 

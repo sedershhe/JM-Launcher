@@ -45,8 +45,26 @@ public static class RuntimeBootstrap
             EventRelay? relay = null;
             try
             {
+                // 启动时解析一次并缓存三级数据根（%APPDATA%/%LOCALAPPDATA% → 临时目录 →
+                // 程序目录 runtime_data），随后所有子目录都基于选定根创建。解析失败不抛，
+                // 具体级别与原因记录在 AppPaths.LastFailures + 程序目录诊断标记里。
+                AppPaths.ResolveDataRoots();
                 AppPaths.EnsureCreated();
                 PythonRuntime.Initialize();
+
+                // 数据根必须在 Python 初始化之后、任何写盘入口之前注入：插件配置、
+                // disabled.json、插件数据目录与诊断日志都跟随它（契约 §十三）。
+                BridgeResultDto dataRoot = PythonGateway.CallJson<BridgeResultDto>(
+                    backend => (string)backend.set_data_root(
+                        AppPaths.ConfigDirectory,
+                        AppPaths.PluginDataRoot,
+                        AppPaths.LogDirectory));
+                if (!dataRoot.Ok)
+                {
+                    LogSanitizer.Log(
+                        $"设置 Python 数据目录失败（回退到 Python 默认路径）：" +
+                        $"[{dataRoot.ErrorCode}] {dataRoot.ErrorMessage}");
+                }
 
                 // 诊断落盘目录由 C# 计算后传入，Python 侧不硬编码路径（契约 §九.3）。
                 SetLogDirResultDto logDir = PythonGateway.SetLogDirectory(AppPaths.LogDirectory);
@@ -73,7 +91,8 @@ public static class RuntimeBootstrap
 
                 _events = relay;
                 LastFailureMessage = null;
-                LogSanitizer.Log($"Python 后端启动完成，日志目录：{AppPaths.LogDirectory}");
+                LogSanitizer.Log(
+                    $"Python 后端启动完成，数据根：{AppPaths.RootKind}，日志目录：{AppPaths.LogDirectory}");
                 return true;
             }
             catch (Exception ex)

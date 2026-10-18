@@ -69,6 +69,22 @@
                 </StackPanel>
             </ctl:JmlCard>
 
+            <!-- 数据目录：只读展示当前选中的根；降级时给出明确提示，
+                 不提供切换入口（根在启动时解析一次，改根需重启）。 -->
+            <ctl:JmlCard x:Name="CardDataRoot" Header="数据目录" Margin="0,12,0,0" HorizontalAlignment="Stretch">
+                <StackPanel>
+                    <TextBlock x:Name="TextDataRoot"
+                               Text="配置：—&#x0a;数据：—&#x0a;插件数据：—"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource ColorBrush1}" />
+                    <TextBlock x:Name="TextDataRootHint"
+                               Visibility="Collapsed"
+                               Margin="0,6,0,0"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource ColorBrushError}" />
+                </StackPanel>
+            </ctl:JmlCard>
+
             <!-- 插件设置：按已加载插件的 manifest config.schema 动态生成字段（任务 3-B）。
                  字段控件由 Pages\SettingsPage.PluginSettings.cs 运行时创建，
                  这里只留空态文字 / 错误行 / 字段容器 / 保存按钮，样式全部复用现有资源。 -->

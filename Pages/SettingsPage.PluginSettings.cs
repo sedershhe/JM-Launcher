@@ -597,11 +597,25 @@ internal sealed class PluginSettingEditor
         ErrorText.Visibility = Visibility.Collapsed;
     }
 
-    /// <summary>显示 <c>[error_code] error_message</c>（已脱敏）；不弹全局框。</summary>
+    /// <summary>
+    /// 显示 <c>[error_code] error_message</c>（已脱敏）；不弹全局框。
+    /// IO_ERROR 额外补一句当前数据目录，告诉用户“为什么写不进去、去哪里看”，
+    /// 同时保留原始 error_code 与 Python 给出的原因。
+    /// </summary>
     public void ShowError(string errorCode, string errorMessage)
     {
-        ErrorText.Text =
-            $"[{LogSanitizer.Sanitize(errorCode)}] {LogSanitizer.Sanitize(errorMessage)}";
+        string safeCode = LogSanitizer.Sanitize(errorCode);
+        string safeMessage = LogSanitizer.Sanitize(errorMessage);
+        if (string.Equals(safeCode, "IO_ERROR", StringComparison.Ordinal) &&
+            !safeMessage.Contains("数据目录", StringComparison.Ordinal))
+        {
+            safeMessage =
+                "配置写入失败：数据目录不可写" +
+                $"（当前数据目录：{LogSanitizer.Sanitize(AppPaths.DataDirectory)}）；" +
+                safeMessage;
+        }
+
+        ErrorText.Text = $"[{safeCode}] {safeMessage}";
         ErrorText.Visibility = Visibility.Visible;
     }
 }

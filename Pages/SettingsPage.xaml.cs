@@ -55,6 +55,7 @@ public partial class SettingsPage : UserControl
         InitializeComponent();
         _settings = AppSettings.Load();
         ApplyDownloadDirectory();
+        ApplyDataRootInfo();
         Loaded += OnLoaded;
     }
 
@@ -89,8 +90,43 @@ public partial class SettingsPage : UserControl
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         ApplyDownloadDirectory();
+        ApplyDataRootInfo();
         // 账号状态与插件设置并行拉取；两者内部都已收口，不会因一方失败影响另一方。
         await Task.WhenAll(RefreshAccountStatusAsync(), RefreshPluginSettingsAsync());
+    }
+
+    /// <summary>
+    /// 只读展示当前数据目录；首选 %APPDATA%/%LOCALAPPDATA% 不可写时给出降级提示。
+    /// 本页不提供切换入口（数据根在启动时解析一次，切换需重启）。
+    /// </summary>
+    private void ApplyDataRootInfo()
+    {
+        TextDataRoot.Text =
+            $"配置：{AppPaths.ConfigDirectory}\n" +
+            $"数据：{AppPaths.DataDirectory}\n" +
+            $"插件数据：{AppPaths.PluginDataRoot}";
+        string hint = BuildDataRootHint(AppPaths.RootKind, AppPaths.ConfigDirectory);
+        TextDataRootHint.Text = hint;
+        TextDataRootHint.Visibility = string.IsNullOrEmpty(hint)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// 降级提示文案（空串表示首选目录正常）。纯函数，便于离线测试。
+    /// </summary>
+    internal static string BuildDataRootHint(DataRootKind kind, string selectedDirectory)
+    {
+        return kind switch
+        {
+            DataRootKind.Temp =>
+                "系统数据目录（%APPDATA% / %LOCALAPPDATA%）不可写，已自动降级到系统临时目录：" +
+                $"{selectedDirectory}。下载、插件配置、日志与设置仍可正常使用，但该目录可能被系统清理。",
+            DataRootKind.ProgramDir =>
+                "系统数据目录与系统临时目录都不可写，已自动降级到程序目录 runtime_data：" +
+                $"{selectedDirectory}。下载、插件配置、日志与设置仍可正常使用。",
+            _ => "",
+        };
     }
 
     /// <summary>从 Python 查一次账号状态；失败只显示可读错误，不影响页面其它功能。</summary>

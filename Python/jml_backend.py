@@ -29,6 +29,9 @@
                                                    写插件设置（按 schema 校验 + 落盘），返回 JSON
     set_event_sink(callback) -> str                注册事件出口；callback(事件 JSON 字符串)
     clear_event_sink() -> str                      移除事件出口
+    set_data_root(config_root: str, plugin_data_root: str, log_dir: str = "") -> str
+                                                   注入 C# 选定的数据根（实测可写），返回 JSON
+    set_log_dir(path: str) -> str                  设置诊断落盘目录，返回 JSON
     parse_book_ids(text: str) -> str               编号解析，返回 JSON
     start_download(book_ids_json: str, target_dir: str, work_dir: str = "") -> str
                                                    登记批次后**立即返回** JSON（后台线程下载）
@@ -831,6 +834,71 @@ def search(keyword: str, page: int, session_key: str = "main") -> str:
         return _failure(exc)
 
 
+def set_data_root(
+    config_root: str, plugin_data_root: str, log_dir: str = ""
+) -> str:
+    """注入 C# 侧选定的数据根（三级降级链的最终结果），返回 JSON。
+
+    C# 必须在 ``PythonRuntime.Initialize()`` 之后、任何写盘入口（插件 bootstrap、
+    设置写入、诊断落盘）之前调用本入口一次。参数语义：
+
+    - ``config_root``：配置/状态根（settings 的 Python 侧对应物、插件配置、
+      ``disabled.json``、插件数据目录都挂在它下面）；
+    - ``plugin_data_root``：插件配置与插件数据根（通常
+      ``<config_root>/plugins``，C# 侧为 ``AppPaths.PluginDataRoot``）；
+    - ``log_dir``：诊断落盘目录；空串表示不落盘。
+
+    校验规则（实测，不只看目录是否存在）：逐个目录做“创建目录 + 写临时文件 +
+    删除”探针；任一必填目录不可写返回 ``INVALID_ARGUMENT``，此时**不改变**
+    当前生效的数据根，所有后续写盘仍走旧根。成功后才切换，并同步设置诊断
+    落盘目录。
+
+    成功::
+
+        {"ok": true, "config_root": str, "plugin_data_root": str, "log_dir": str}
+    """
+    try:
+        from jml.host import paths
+
+        config = str(config_root or "").strip()
+        plugin = str(plugin_data_root or "").strip()
+        logs = str(log_dir or "").strip()
+        if not config or not plugin:
+            return _dumps(
+                make_error(
+                    ERROR_INVALID_ARGUMENT,
+                    "配置目录与插件数据目录不能为空",
+                )
+            )
+
+        failures: list[str] = []
+        for label, directory in (("配置目录", config), ("插件数据目录", plugin)):
+            if not paths.probe_writable(directory):
+                failures.append(f"{label}不可写：{directory}")
+        if logs and not paths.probe_writable(logs):
+            failures.append(f"日志目录不可写：{logs}")
+
+        if failures:
+            message = "数据目录不可写（" + "；".join(failures) + "）"
+            # 诊断环表自动脱敏；这里只记录路径与级别，不含凭据。
+            diagnostics.record("DATA_ROOT_INVALID", message)
+            return _dumps(make_error(ERROR_INVALID_ARGUMENT, message))
+
+        # 只有全部实测通过才切换：避免半切换导致配置写到新根、日志还在旧根。
+        paths.configure(config, plugin, logs or None)
+        diagnostics.set_log_dir(logs or None)
+        return _dumps(
+            {
+                "ok": True,
+                "config_root": paths.config_root(),
+                "plugin_data_root": paths.plugin_data_root(),
+                "log_dir": paths.log_dir() or "",
+            }
+        )
+    except Exception as exc:
+        return _failure(exc)
+
+
 def set_log_dir(path: str) -> str:
     """设置诊断落盘目录（可选；缺省只在内存保留）。
 
@@ -999,7 +1067,7 @@ def reset_host_state() -> None:
         _STATE["event_sink"] = None
 
     from jml import events
-    from jml.host import loader, registry
+    from jml.host import loader, paths, registry
 
     registry.reset()
     events.reset()
@@ -1008,6 +1076,7 @@ def reset_host_state() -> None:
     account.reset_state()
     jm_source.reset_source()
     downloader.reset()
+    paths.reset()
     diagnostics.set_log_dir(None)
 
 

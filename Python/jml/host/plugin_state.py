@@ -7,13 +7,14 @@
 - 界面需要知道"停用后会影响谁"，因此这里按拓扑关系（可传递）算出
   dependents。
 
-存储：``%APPDATA%/JML/plugins/disabled.json``，内容是被停用插件 id 的
-JSON 数组（白名单语义：只记录"停用"，不记录"启用"）。写入用
-"同目录临时文件 + os.replace" 原子替换。
+存储：``<plugin_data_root>/disabled.json``，默认 ``%APPDATA%/JML/plugins/disabled.json``；
+根目录由 C# 启动时注入 ``jml.host.paths``（数据目录可降级），本模块不直接读
+环境变量。内容是被停用插件 id 的 JSON 数组（白名单语义：只记录"停用"，
+不记录"启用"）。写入用"同目录临时文件 + os.replace" 原子替换。
 
 边界：
 - 本模块只做状态存取与状态推导，不 import 插件、不注册服务；
-- 不硬编码绝对路径（APPDATA 缺失时回退用户主目录，与 config.py 一致）；
+- 不硬编码绝对路径（根目录由 ``jml.host.paths`` 提供，默认 %APPDATA%/JML/plugins）；
 - 依赖 loader 的函数在函数体内惰性 import，避免模块循环依赖。
 """
 
@@ -24,6 +25,7 @@ import os
 import threading
 
 from jml.core.errors import InvalidArgumentError
+from jml.host import paths
 
 #: 禁用列表文件名（与各插件配置目录同级）
 DISABLED_FILENAME = "disabled.json"
@@ -41,9 +43,11 @@ _DISABLED_LOCK = threading.RLock()
 
 
 def disabled_plugins_path() -> str:
-    """禁用列表落盘路径：``%APPDATA%/JML/plugins/disabled.json``。"""
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "JML", "plugins", DISABLED_FILENAME)
+    """禁用列表落盘路径：``<plugin_data_root>/disabled.json``。
+
+    默认 ``%APPDATA%/JML/plugins/disabled.json``；C# 注入降级根后跟随新根。
+    """
+    return os.path.join(paths.plugin_data_root(), DISABLED_FILENAME)
 
 
 def load_disabled_ids() -> list[str]:

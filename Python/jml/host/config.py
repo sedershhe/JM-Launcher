@@ -6,8 +6,10 @@
   拒绝写入并回退默认值（对应旧缺陷 #5：schema 真正用于校验）
 - ``describe_schema()`` 把 schema 枚举成设置界面字段列表（类型受限于
   text/password/number/bool/select/path），供主设置窗口动态表单使用
-- 存储路径：%APPDATA%/JML/plugins/{id}/config.json
-  （用 os.environ["APPDATA"]，注释与 docstring 一律不写裸反斜杠路径，
+- 存储路径：``<plugin_data_root>/{id}/config.json``，默认
+  ``%APPDATA%/JML/plugins/{id}/config.json``；实际根由 C# 启动时通过
+  ``jml_backend.set_data_root`` 注入 ``jml.host.paths``（数据目录可降级），
+  本模块**不直接读环境变量**（注释与 docstring 一律不写裸反斜杠路径，
   避免 SyntaxWarning——见计划书 11.5 坑 #4）
 
 安全红线：配置文件不含任何凭据。schema 里 ``"ui": "password"`` 的项视为
@@ -23,6 +25,7 @@ import os
 import threading
 
 from jml.core.protocol import ConfigError
+from jml.host import paths
 
 #: 支持的 schema 字段类型（type 取值，用于校验）
 _SUPPORTED_TYPES = ("string", "integer", "number", "boolean")
@@ -70,7 +73,6 @@ class PluginConfig:
         self._password_keys = frozenset(
             key for key, ftype in self._field_types.items() if ftype == "password"
         )
-        self._path = self._storage_path(self._plugin_id)
         self._values = dict(self._defaults)
         self._load_stored()
 
@@ -164,8 +166,8 @@ class PluginConfig:
 
     @property
     def storage_path(self) -> str:
-        """配置文件落盘路径（只读属性，供诊断）。"""
-        return self._path
+        """配置文件落盘路径（每次按当前数据根计算，供诊断）。"""
+        return self._storage_path(self._plugin_id)
 
     # -- 内部实现 -----------------------------------------------------------
 
@@ -252,19 +254,20 @@ class PluginConfig:
 
     @staticmethod
     def _storage_path(plugin_id: str) -> str:
-        """配置落盘路径：%APPDATA%/JML/plugins/{id}/config.json。
+        """配置落盘路径：``<plugin_data_root>/{id}/config.json``。
 
-        APPDATA 环境变量缺失时回退到用户主目录（罕见，仅保底）。
+        根目录由 C# 启动时注入（见 :mod:`jml.host.paths`）；未注入时回退
+        ``%APPDATA%/JML/plugins``，与旧实现兼容。
         """
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "JML", "plugins", plugin_id, "config.json")
+        return os.path.join(paths.plugin_data_root(), plugin_id, "config.json")
 
     def _load_stored(self) -> None:
         """读已落盘的配置，合并到当前值（非法的存量值忽略，保持默认）。"""
-        if not os.path.isfile(self._path):
+        path = self.storage_path
+        if not os.path.isfile(path):
             return
         try:
-            with open(self._path, "r", encoding="utf-8") as fh:
+            with open(path, "r", encoding="utf-8") as fh:
                 stored = json.load(fh)
         except (OSError, json.JSONDecodeError):
             # 存量文件损坏 → 当作不存在，全部用默认值（不让坏文件炸宿主）
@@ -291,15 +294,22 @@ class PluginConfig:
             for key, value in self._values.items()
             if key not in self._password_keys
         }
-        directory = os.path.dirname(self._path)
+        path = self.storage_path
+        directory = os.path.dirname(path)
         os.makedirs(directory, exist_ok=True)
-        tmp_path = self._path + ".tmp"
+        tmp_path = path + ".tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._path)
+            os.replace(tmp_path, path)
         except OSError as exc:
-            raise ConfigError(f"插件 {self._plugin_id} 的配置写入失败: {exc}") from exc
+            # 面向用户的行动提示：绝大多数写盘失败都是数据目录不可写/被占用。
+            # 保留 error_code=IO_ERROR（由桥接层映射），文案给出当前数据目录，
+            # 便于用户检查权限或改用可写目录（不含任何凭据）。
+            raise ConfigError(
+                f"配置写入失败：数据目录不可写（当前数据目录：{directory}）；"
+                f"原始错误：{exc}"
+            ) from exc
 
     def _validate(self, key: str, value: object) -> object:
         """校验单值，通过则原样返回，不通过抛 ConfigError（中文消息）。"""

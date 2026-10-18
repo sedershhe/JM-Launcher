@@ -3,7 +3,8 @@
 用途：所有"不能抛给用户、但必须可排查"的异常都记到这里，而不是 ``except: pass``。
 
 - 默认只在内存保留最近 ``CAPACITY`` 条，不创建任何文件、不硬编码路径；
-- ``set_log_dir(path)`` 由 C# 后续传入时才追加落盘到
+- ``set_log_dir(path)`` 由 C# 启动时传入（根目录由 ``jml.host.paths`` 统一持有，
+  本模块不读 ``%APPDATA%``/``%LOCALAPPDATA%`` 等环境变量），设置后才追加落盘到
   ``<path>/diagnostics.log``（不传就完全不碰磁盘）；
 - 所有消息与堆栈都经 ``sanitize_text`` 脱敏；
 - 线程安全：显式 ``threading.RLock``。

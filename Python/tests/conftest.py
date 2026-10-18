@@ -113,12 +113,13 @@ def reset_host_state():
     """
     from jml import events
     from jml.core import account, diagnostics, downloader, jm_source, searcher
-    from jml.host import loader, registry
+    from jml.host import loader, paths, registry
 
     def _reset_all() -> None:
         registry.reset()
         events.reset()
         loader.reset()
+        paths.reset()
         diagnostics.set_log_dir(None)
         diagnostics.clear()
         # 阶段 2：共享搜索会话、数据源单例与下载批次登记也要隔离

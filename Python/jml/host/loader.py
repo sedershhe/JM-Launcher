@@ -36,7 +36,7 @@ from jml.core.protocol import (
     PluginError,
 )
 from jml import events
-from jml.host import pages
+from jml.host import pages, paths
 from jml.host.manifest import load_manifest
 from jml.host.plugin_context import PluginContext
 from jml.host.plugin_state import DISABLED_REASON
@@ -342,14 +342,14 @@ def _load_single(manifest: dict) -> None:
 
 
 def plugin_data_dir(plugin_id: str) -> str:
-    """插件可写数据目录：%APPDATA%/JML/plugins/{plugin_id}/data。
+    """插件可写数据目录：``<plugin_data_root>/{plugin_id}/data``。
 
-    与配置文件同根（``config.py`` 的 config.json 位于上一级目录），由宿主
-    统一推导并创建，插件只拿绝对路径（插件里不拼 APPDATA 路径）。
-    APPDATA 缺失时回退到用户主目录（与 config.py 的保底规则一致）。
+    根目录由 C# 启动时注入（``jml.host.paths``），默认
+    ``%APPDATA%/JML/plugins/{plugin_id}/data``。与配置文件同根
+    （``config.py`` 的 config.json 位于上一级目录），由宿主统一推导并创建，
+    插件只拿绝对路径（插件里不拼 APPDATA 路径）。
     """
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "JML", "plugins", plugin_id, "data")
+    return os.path.join(paths.plugin_data_root(), plugin_id, "data")
 
 
 def _create_data_dir(plugin_id: str) -> str:
