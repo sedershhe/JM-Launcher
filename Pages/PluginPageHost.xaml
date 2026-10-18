@@ -42,11 +42,21 @@
             <!-- ================= list 模板 ================= -->
             <Grid x:Name="PanelList" Visibility="Collapsed">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
+                <!-- 可选筛选下拉（阶段 4-4：data.filters；选项与当前值全部来自
+                     Python，C# 只按用户选择把 {page:1, <key>: <value>} 回传） -->
+                <StackPanel x:Name="PanelListFilters"
+                            Grid.Row="0"
+                            Orientation="Horizontal"
+                            Margin="0,0,0,8"
+                            Visibility="Collapsed" />
+
                 <DataGrid x:Name="GridRows"
+                          Grid.Row="1"
                           Style="{StaticResource JmlDataGrid}"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
@@ -58,6 +68,7 @@
                           HeadersVisibility="Column" />
 
                 <TextBlock x:Name="TextListEmpty"
+                           Grid.Row="1"
                            Visibility="Collapsed"
                            HorizontalAlignment="Center"
                            VerticalAlignment="Center"
@@ -66,7 +77,7 @@
                            TextWrapping="Wrap" />
 
                 <StackPanel x:Name="PanelListPager"
-                            Grid.Row="1"
+                            Grid.Row="2"
                             Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Margin="0,8,0,0">

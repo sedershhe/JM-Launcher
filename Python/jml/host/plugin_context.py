@@ -164,7 +164,8 @@ class PluginContext:
         """注册页面动作钩子：``handler(payload: dict) -> dict``。
 
         handler 返回 dict 可含 ``refresh``（bool）/ ``data``（dict|null）/
-        ``message``（str）；其余键被忽略。
+        ``message``（str）/ ``intent``（dict，阶段 4-4：给 C# 的转发意图，
+        宿主原样透传）；其余键被忽略。
 
         异常:
             PageError —— 页面未声明 / action_id 为空 / handler 不可调用。

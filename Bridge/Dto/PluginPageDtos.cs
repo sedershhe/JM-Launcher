@@ -44,6 +44,32 @@ public record PluginPageActionResultDto : BridgeResultDto
     /// <summary>状态文案（原样展示）</summary>
     [JsonPropertyName("message")]
     public string Message { get; init; } = "";
+
+    /// <summary>
+    /// 给 C# 的转发意图（阶段 4-4 协议扩展；缺省 null）。
+    /// Python 侧原样透传，C# 只交给主窗口转发，不做业务判断。
+    /// </summary>
+    [JsonPropertyName("intent")]
+    public PluginPageIntentDto? Intent { get; init; }
+}
+
+/// <summary>
+/// 页面动作的转发意图（阶段 4-4）：收藏夹「详情 / 下载」用。
+/// C# 只按 <see cref="Kind"/> 转发给主窗口既有路径，不解释业务。
+/// </summary>
+public record PluginPageIntentDto
+{
+    /// <summary>意图类型：detail / download（插件与主窗口约定）</summary>
+    [JsonPropertyName("kind")]
+    public string Kind { get; init; } = "";
+
+    /// <summary>单个本子号（detail 使用）</summary>
+    [JsonPropertyName("book_id")]
+    public string BookId { get; init; } = "";
+
+    /// <summary>批量本子号（download 使用）</summary>
+    [JsonPropertyName("book_ids")]
+    public List<string> BookIds { get; init; } = [];
 }
 
 /// <summary>list 模板的列定义。</summary>
@@ -74,6 +100,36 @@ public record PluginPageRowActionDto
     public bool Primary { get; init; }
 }
 
+/// <summary>list 模板筛选下拉的一个选项（阶段 4-4 协议扩展）。</summary>
+public record PluginPageFilterOptionDto
+{
+    [JsonPropertyName("value")]
+    public string Value { get; init; } = "";
+
+    [JsonPropertyName("label")]
+    public string Label { get; init; } = "";
+}
+
+/// <summary>
+/// list 模板的可选筛选下拉（阶段 4-4）：C# 按 <see cref="Key"/> 把选中的
+/// <see cref="Value"/> 作为页面加载参数回传，内容由插件决定。
+/// </summary>
+public record PluginPageFilterDto
+{
+    [JsonPropertyName("key")]
+    public string Key { get; init; } = "";
+
+    [JsonPropertyName("label")]
+    public string Label { get; init; } = "";
+
+    [JsonPropertyName("options")]
+    public List<PluginPageFilterOptionDto> Options { get; init; } = [];
+
+    /// <summary>当前值（与某个 option 的 value 对应）</summary>
+    [JsonPropertyName("value")]
+    public string Value { get; init; } = "";
+}
+
 /// <summary>list 模板 payload。</summary>
 public record PluginListPageDto
 {
@@ -99,6 +155,14 @@ public record PluginListPageDto
 
     [JsonPropertyName("row_actions")]
     public List<PluginPageRowActionDto> RowActions { get; init; } = [];
+
+    /// <summary>
+    /// 可选筛选下拉（阶段 4-4）：每项渲染成一个下拉框，变更后以
+    /// <c>{page: 1, &lt;key&gt;: &lt;value&gt;}</c> 重新 plugin_page_load。
+    /// 缺省空列表表示不渲染筛选栏。
+    /// </summary>
+    [JsonPropertyName("filters")]
+    public List<PluginPageFilterDto> Filters { get; init; } = [];
 
     [JsonPropertyName("empty_text")]
     public string EmptyText { get; init; } = "";

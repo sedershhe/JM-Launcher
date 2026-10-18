@@ -193,6 +193,7 @@ public class PluginPageTests
 
         Assert.False(bare.Refresh);
         Assert.Null(bare.Data);
+        Assert.Null(bare.Intent);
 
         PluginPageActionResultDto fail = Parse<PluginPageActionResultDto>(
             """{"ok": false, "error_code": "NOT_IMPLEMENTED", "error_message": "未实现动作钩子"}""");
@@ -200,6 +201,72 @@ public class PluginPageTests
         Assert.False(fail.Ok);
         Assert.Equal("NOT_IMPLEMENTED", fail.ErrorCode);
         Assert.Null(fail.Data);
+    }
+
+    [Fact]
+    public void ActionResult_ReadsDetailAndDownloadIntents()
+    {
+        PluginPageActionResultDto detail = Parse<PluginPageActionResultDto>(
+            """
+            {"ok": true, "refresh": false, "data": null, "message": "",
+             "intent": {"kind": "detail", "book_id": "123"}}
+            """);
+        Assert.NotNull(detail.Intent);
+        Assert.Equal("detail", detail.Intent!.Kind);
+        Assert.Equal("123", detail.Intent.BookId);
+        Assert.Empty(detail.Intent.BookIds);
+
+        PluginPageActionResultDto download = Parse<PluginPageActionResultDto>(
+            """
+            {"ok": true, "intent": {"kind": "download", "book_ids": ["456", "789"]}}
+            """);
+        Assert.NotNull(download.Intent);
+        Assert.Equal("download", download.Intent!.Kind);
+        Assert.Equal(new[] { "456", "789" }, download.Intent.BookIds);
+    }
+
+    [Fact]
+    public void LoadResult_ReadsListFilters()
+    {
+        const string json = """
+        {
+          "ok": true,
+          "template": "list",
+          "title": "收藏夹",
+          "data": {
+            "columns": [{"key": "title", "title": "标题"}],
+            "rows": [],
+            "filters": [
+              {"key": "folder_id", "label": "收藏夹",
+               "options": [
+                 {"value": "0", "label": "全部"},
+                 {"value": "7", "label": "子夹"}
+               ],
+               "value": "7"},
+              {"key": "sort", "label": "排序",
+               "options": [
+                 {"value": "mr", "label": "最近收藏"},
+                 {"value": "mv", "label": "最多点击"}
+               ],
+               "value": "mv"}
+            ],
+            "empty_text": "收藏夹是空的"
+          }
+        }
+        """;
+
+        PluginPageLoadResultDto dto = Parse<PluginPageLoadResultDto>(json);
+        PluginListPageDto page =
+            Assert.IsType<PluginListPageDto>(PluginPageData.ToList(dto.Data));
+
+        Assert.Equal(2, page.Filters.Count);
+        Assert.Equal("folder_id", page.Filters[0].Key);
+        Assert.Equal("收藏夹", page.Filters[0].Label);
+        Assert.Equal("7", page.Filters[0].Value);
+        Assert.Equal(2, page.Filters[0].Options.Count);
+        Assert.Equal("子夹", page.Filters[0].Options[1].Label);
+        Assert.Equal("sort", page.Filters[1].Key);
+        Assert.Equal("mv", page.Filters[1].Value);
     }
 
     [Fact]
@@ -324,6 +391,59 @@ public class PluginPageTests
                 emptyText: ""));
             Assert.True(Find<Button>(host, "BtnListPrev").IsEnabled);
             Assert.False(Find<Button>(host, "BtnListNext").IsEnabled);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_RendersFiltersAndReloadsWithSelectedValues()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            gateway.PendingLoads.Enqueue(ListResultWithFilters(folderValue: "7", sortValue: "mv"));
+            var host = NewHost(gateway);
+
+            host.ApplyLoad(ListResultWithFilters(folderValue: "7", sortValue: "mv"));
+
+            var filtersPanel = Find<StackPanel>(host, "PanelListFilters");
+            Assert.Equal(Visibility.Visible, filtersPanel.Visibility);
+            Assert.Equal(2, host.ListFilterCombos.Count);
+
+            ComboBox folder = host.ListFilterCombos[0];
+            Assert.Equal("收藏夹", (filtersPanel.Children[0] as TextBlock)?.Text);
+            Assert.Equal(2, folder.Items.Count);
+            Assert.Equal(1, folder.SelectedIndex); // 当前值 "7"（第二项）
+
+            ComboBox sort = host.ListFilterCombos[1];
+            Assert.Equal(1, sort.SelectedIndex); // 当前值 "mv"（第二项）
+
+            // 用户切换收藏夹 → 以 {page:1, folder_id, sort} 重新加载
+            folder.SelectedIndex = 0;
+            await WaitUntilAsync(() => gateway.LoadCalls.Count >= 1);
+
+            using JsonDocument document = JsonDocument.Parse(gateway.LoadCalls[0]);
+            JsonElement root = document.RootElement;
+            Assert.Equal(1, root.GetProperty("page").GetInt32());
+            Assert.Equal("0", root.GetProperty("folder_id").GetString());
+            Assert.Equal("mv", root.GetProperty("sort").GetString());
+            Assert.Equal(Visibility.Collapsed, Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_HidesFilterBarWithoutFilters()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+
+            host.ApplyLoad(ListResult(
+                page: 1, totalPages: 1, rows: 1, rowActions: 0, emptyText: ""));
+
+            Assert.Empty(host.ListFilterCombos);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<StackPanel>(host, "PanelListFilters").Visibility);
         });
     }
 
@@ -740,6 +860,76 @@ public class PluginPageTests
         });
     }
 
+    [Fact]
+    public void Host_ActionIntent_ForwardsDetailAndDownloadToInjectedHandler()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            var handler = new FakeUiIntentHandler();
+            host.IntentHandler = handler;
+            host.ApplyLoad(ListResult(
+                page: 1, totalPages: 1, rows: 1, rowActions: 1, emptyText: ""));
+
+            // detail：只把 book_id 转给主窗口（C# 不打开窗口、不做业务）
+            await host.ApplyActionResultAsync(new PluginPageActionResultDto
+            {
+                Ok = true,
+                Intent = new PluginPageIntentDto { Kind = "detail", BookId = "123" },
+            });
+
+            // download：只把 book_ids 转给主窗口（切下载页由主窗口负责）
+            await host.ApplyActionResultAsync(new PluginPageActionResultDto
+            {
+                Ok = true,
+                Intent = new PluginPageIntentDto
+                {
+                    Kind = "download",
+                    BookIds = ["456", "789"],
+                },
+            });
+
+            Assert.Equal(2, handler.Intents.Count);
+            Assert.Equal("detail", handler.Intents[0].Kind);
+            Assert.Equal("123", handler.Intents[0].BookId);
+            Assert.Empty(handler.Intents[0].BookIds);
+            Assert.Equal("download", handler.Intents[1].Kind);
+            Assert.Equal(new[] { "456", "789" }, handler.Intents[1].BookIds);
+            Assert.Equal(Visibility.Collapsed, Find<TextBlock>(host, "TextError").Visibility);
+
+            // 未知 kind 不崩溃、不报错：C# 原样转发，是否处理由主窗口决定
+            await host.ApplyActionResultAsync(new PluginPageActionResultDto
+            {
+                Ok = true,
+                Intent = new PluginPageIntentDto { Kind = "unknown" },
+            });
+            Assert.Equal(3, handler.Intents.Count);
+            Assert.Equal("unknown", handler.Intents[2].Kind);
+            Assert.Equal(Visibility.Collapsed, Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_ActionIntent_WithoutHandlerShowsProtocolError()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ListResult(
+                page: 1, totalPages: 1, rows: 1, rowActions: 1, emptyText: ""));
+
+            await host.ApplyActionResultAsync(new PluginPageActionResultDto
+            {
+                Ok = true,
+                Intent = new PluginPageIntentDto { Kind = "detail", BookId = "1" },
+            });
+
+            var error = Find<TextBlock>(host, "TextError");
+            Assert.Equal(Visibility.Visible, error.Visibility);
+            Assert.Contains("[NOT_IMPLEMENTED]", error.Text);
+        });
+    }
+
     // ------------------------------------------------------------------
     // PluginPageHost：action 模板的阶段 4-3 扩展（url / allow_folder_choice）
     // ------------------------------------------------------------------
@@ -1058,6 +1248,60 @@ public class PluginPageTests
         """;
 
         return Parse<PluginPageLoadResultDto>(json);
+    }
+
+    private static PluginPageLoadResultDto ListResultWithFilters(
+        string folderValue,
+        string sortValue)
+    {
+        string json = $$"""
+        {
+          "ok": true,
+          "template": "list",
+          "title": "收藏夹",
+          "data": {
+            "columns": [
+              {"key": "title", "title": "标题"},
+              {"key": "author", "title": "作者"}
+            ],
+            "rows": [{"title": "标题A", "author": "作者A", "book_id": "123"}],
+            "page": 1,
+            "page_size": 20,
+            "total": 1,
+            "total_pages": 1,
+            "row_actions": [
+              {"id": "detail", "title": "详情", "primary": true},
+              {"id": "download", "title": "下载"}
+            ],
+            "filters": [
+              {"key": "folder_id", "label": "收藏夹",
+               "options": [
+                 {"value": "0", "label": "全部"},
+                 {"value": "7", "label": "子夹"}
+               ],
+               "value": "{{folderValue}}"},
+              {"key": "sort", "label": "排序",
+               "options": [
+                 {"value": "mr", "label": "最近收藏"},
+                 {"value": "mv", "label": "最多点击"},
+                 {"value": "mp", "label": "最多图片"}
+               ],
+               "value": "{{sortValue}}"}
+            ],
+            "empty_text": "收藏夹是空的"
+          }
+        }
+        """;
+
+        return Parse<PluginPageLoadResultDto>(json);
+    }
+
+    /// <summary>假 intent 转发器：只记录收到的意图（离线、不打开任何窗口）。</summary>
+    private sealed class FakeUiIntentHandler : IUiIntentHandler
+    {
+        public List<PluginPageIntentDto> Intents { get; } = [];
+
+        public void HandleIntent(PluginPageIntentDto intent) => Intents.Add(intent);
     }
 
     /// <summary>假插件页面网关：只记录调用并返回预置 DTO（离线、无 Python）。</summary>

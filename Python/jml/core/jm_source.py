@@ -33,6 +33,10 @@
         清理内存登录态（不联网、不落盘）
     is_logged_in() -> bool
         返回当前数据源会话是否已登录
+    logged_in_client() -> object
+        返回**已登录**的底层客户端对象（阶段 4-4：``jm.session`` 服务用它把
+        登录会话交给插件）；未登录抛 ``errors.NotLoggedInError``
+        （``NOT_LOGGED_IN``），不自动登录、不返回任何凭据
 
 本模块不硬编码任何绝对路径；图片临时目录由调用方（downloader）传入。
 """
@@ -55,6 +59,7 @@ from jml.core.errors import (
     ImageError,
     InvalidArgumentError,
     InvalidCredentialsError,
+    NotLoggedInError,
     sanitize_text,
 )
 from jml.core.protocol import EVENT_DOWNLOAD_LOG
@@ -307,6 +312,32 @@ class JmcomicSource:
             if self._logged_in:
                 return True
             return bool(getattr(self._client, "_username", None))
+
+    def logged_in_client(self):
+        """返回**已登录**的 jmcomic 客户端对象（``jm.session`` 服务唯一入口）。
+
+        阶段 4-4：收藏夹等需要登录态的只读功能由插件通过
+        ``ctx.get_service("jm.session", 1).get_client()`` 取得这个对象，
+        插件因此**不需要也没有通道**接触账号密码（密码始终只在
+        ``core.account`` 的进程内存里）。
+
+        语义锁定：
+        - 未登录 → 抛 :class:`jml.core.errors.NotLoggedInError`
+          （错误码 ``NOT_LOGGED_IN``），**不自动登录**——自动登录只由
+          ``jm.account.ensure_login`` 决定，插件必须先确保登录；
+        - 返回的是宿主缓存的**同一个**客户端实例（含内存登录 cookies），
+          插件只读使用，不新建会话、不落盘；
+        - 本方法不读取、不返回用户名/密码/cookie 字典，只给客户端对象本身。
+        """
+        with self._lock:
+            logged_in = self._logged_in or bool(
+                getattr(self._client, "_username", None)
+            )
+            if not logged_in:
+                raise NotLoggedInError("尚未登录，无法提供已登录的 jmcomic 客户端")
+            # 客户端在登录成功时必然已创建；_ensure_client 只在极端情况下补建
+            # （RLock 可重入，仍在同一把锁内，登录态与客户端保持一致）。
+            return self._ensure_client()
 
     # -- 协议实现 -----------------------------------------------------------
 
@@ -587,3 +618,19 @@ def set_source(source) -> None:
 def reset_source() -> None:
     """恢复默认（下次 get_source 会新建真实数据源）。"""
     set_source(None)
+
+
+def get_logged_in_client():
+    """返回当前数据源里**已登录**的客户端对象（``jm.session`` 服务实现）。
+
+    数据源协议的可选方法 ``logged_in_client()`` 由数据源自己实现：真实实现是
+    :meth:`JmcomicSource.logged_in_client`，测试注入的假数据源同样可以实现。
+    未实现或未登录都抛 :class:`NotLoggedInError`（``NOT_LOGGED_IN``），
+    本函数不自动登录、不读凭据、不做任何路径探测。
+    """
+    source = get_source()
+    getter = getattr(source, "logged_in_client", None)
+    if not callable(getter):
+        raise NotLoggedInError("当前数据源不支持提供已登录客户端")
+    return getter()
+

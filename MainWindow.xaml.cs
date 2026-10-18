@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using JML.Bridge.Dto;
 using JML.Infrastructure;
 using JML.Navigation;
 using JML.Pages;
@@ -773,7 +774,7 @@ public static class IconButtonMotion
 ///   搜索页「下载」/ 详情窗「下载本子」→ 切到下载页 + 传编号自动开始；
 ///   详情窗由本窗口统一持有/打开，避免多实例互相抢下载日志。
 /// </summary>
-public partial class MainWindow : Window
+public partial class MainWindow : Window, IUiIntentHandler
 {
     private readonly NavigationStack _nav = new();
 
@@ -1218,6 +1219,33 @@ public partial class MainWindow : Window
         }
 
         _detailWindow?.TrackBatch(batchId!);
+    }
+
+    /// <summary>
+    /// 插件页面动作 intent（阶段 4-4）：只转发到既有路径，不做业务判断。
+    /// <c>detail</c> → 打开现有 <see cref="DetailWindow"/>；
+    /// <c>download</c> → 切到下载页并走现有 <c>StartWithIds</c> 路径。
+    /// </summary>
+    public void HandleIntent(PluginPageIntentDto intent)
+    {
+        if (intent is null)
+        {
+            return;
+        }
+
+        switch (intent.Kind)
+        {
+            case "detail":
+                OpenDetailWindow(intent.BookId);
+                break;
+            case "download":
+                if (intent.BookIds.Count > 0)
+                {
+                    _ = StartDownloadFromOtherPageAsync(intent.BookIds);
+                }
+
+                break;
+        }
     }
 
     /// <summary>详情窗统一打开入口：单实例复用，关闭后置空。</summary>

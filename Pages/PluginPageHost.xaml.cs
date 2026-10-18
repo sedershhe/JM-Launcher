@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using JML.Bridge;
 using JML.Bridge.Dto;
@@ -42,6 +43,11 @@ public partial class PluginPageHost : UserControl
     private int _listPage = 1;
     private int _listTotalPages = 1;
 
+    // list 模板筛选下拉（阶段 4-4 协议扩展：data.filters）
+    private readonly Dictionary<string, string> _listFilterValues = [];
+    private readonly Dictionary<string, List<PluginPageFilterOptionDto>> _listFilterOptions = [];
+    private bool _rebuildingListFilters;
+
     // browser 模板状态
     private int _filePage = 1;
     private int _fileTotalPages = 1;
@@ -77,6 +83,17 @@ public partial class PluginPageHost : UserControl
     /// STA 测试注入假实现，避免真的唤起系统浏览器）。返回是否已转发。
     /// </summary>
     internal Func<string, bool>? BrowserOpener { get; set; }
+
+    /// <summary>
+    /// 页面动作 <c>intent</c> 的转发器（阶段 4-4）：生产默认由所属
+    /// <see cref="MainWindow"/> 实现（<c>Window.GetWindow(this)</c> 解析）；
+    /// STA 测试注入假实现断言"只转发、不做业务"。
+    /// </summary>
+    internal IUiIntentHandler? IntentHandler { get; set; }
+
+    /// <summary>当前 list 模板渲染出的筛选下拉（测试用；顺序与 Python 一致）。</summary>
+    internal IReadOnlyList<ComboBox> ListFilterCombos =>
+        PanelListFilters.Children.OfType<ComboBox>().ToList();
 
     /// <summary>当前已选文件夹（Python 的 <c>data.folder</c>，回传时带上）。</summary>
     internal string CurrentFolder => _folder;
@@ -156,6 +173,7 @@ public partial class PluginPageHost : UserControl
                 ["page"] = requested,
             };
             AddFolderParameter(parameters);
+            AddListFilterParameters(parameters);
             ShowStatus("正在加载页面…");
             PluginPageLoadResultDto result =
                 await _gateway.LoadAsync(PluginId, PageId, parameters);
@@ -249,6 +267,7 @@ public partial class PluginPageHost : UserControl
         BtnListNext.IsEnabled = _listPage < _listTotalPages;
 
         BuildListColumns(page);
+        BuildListFilters(page);
 
         bool empty = page.Rows.Count == 0;
         GridRows.ItemsSource = page.Rows
@@ -293,6 +312,121 @@ public partial class PluginPageHost : UserControl
         foreach (PluginPageRowActionDto action in page.RowActions)
         {
             AddRowActionColumn(action);
+        }
+    }
+
+    /// <summary>
+    /// list 模板可选筛选下拉（阶段 4-4）：选项、标签、当前值全部来自 Python
+    /// 的 <c>data.filters</c>；C# 只把用户选中的 value 作为加载参数回传。
+    /// 没有 filters 时整条筛选栏隐藏（旧插件行为不变）。
+    /// </summary>
+    private void BuildListFilters(PluginListPageDto page)
+    {
+        _rebuildingListFilters = true;
+        try
+        {
+            PanelListFilters.Children.Clear();
+            _listFilterValues.Clear();
+            _listFilterOptions.Clear();
+
+            int rendered = 0;
+            foreach (PluginPageFilterDto filter in page.Filters)
+            {
+                if (string.IsNullOrWhiteSpace(filter.Key) || filter.Options.Count == 0)
+                {
+                    continue;
+                }
+
+                if (rendered > 0)
+                {
+                    PanelListFilters.Children.Add(new Border { Width = 16 });
+                }
+
+                PanelListFilters.Children.Add(new TextBlock
+                {
+                    Text = string.IsNullOrWhiteSpace(filter.Label) ? filter.Key : filter.Label,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 6, 0),
+                    FontSize = 13,
+                    Foreground = TryFindResource("ColorBrushGray3") as Brush,
+                });
+
+                var combo = new ComboBox
+                {
+                    MinWidth = 120,
+                    Margin = new Thickness(0, 0, 8, 0),
+                    Tag = filter.Key,
+                };
+
+                int selected = 0;
+                for (int index = 0; index < filter.Options.Count; index++)
+                {
+                    PluginPageFilterOptionDto option = filter.Options[index];
+                    combo.Items.Add(option.Label);
+                    if (string.Equals(option.Value, filter.Value, StringComparison.Ordinal))
+                    {
+                        selected = index;
+                    }
+                }
+
+                combo.SelectedIndex = selected;
+                combo.SelectionChanged += OnListFilterChanged;
+
+                _listFilterOptions[filter.Key] = filter.Options;
+                _listFilterValues[filter.Key] = filter.Options[selected].Value;
+
+                PanelListFilters.Children.Add(combo);
+                rendered++;
+            }
+
+            PanelListFilters.Visibility = rendered > 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+        finally
+        {
+            _rebuildingListFilters = false;
+        }
+    }
+
+    /// <summary>
+    /// 筛选变更：只回传 <c>{page: 1, &lt;key&gt;: &lt;value&gt;}</c> 并重载，
+    /// 页面内容、排序与空态全部由 Python 决定（C# 不做业务判断）。
+    /// </summary>
+    private void OnListFilterChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_rebuildingListFilters
+            || sender is not ComboBox combo
+            || combo.Tag is not string key
+            || combo.SelectedIndex < 0
+            || !_listFilterOptions.TryGetValue(key, out List<PluginPageFilterOptionDto>? options)
+            || combo.SelectedIndex >= options.Count)
+        {
+            return;
+        }
+
+        string value = options[combo.SelectedIndex].Value;
+        if (_listFilterValues.TryGetValue(key, out string? current)
+            && string.Equals(current, value, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _listFilterValues[key] = value;
+        _ = LoadAsync(1);
+    }
+
+    /// <summary>把当前筛选值作为加载参数带给 Python（只对 list 模板生效）。</summary>
+    private void AddListFilterParameters(Dictionary<string, object?> parameters)
+    {
+        if (!string.Equals(_template, "list", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        foreach (KeyValuePair<string, string> pair in _listFilterValues)
+        {
+            parameters[pair.Key] = pair.Value;
         }
     }
 
@@ -922,6 +1056,13 @@ public partial class PluginPageHost : UserControl
             }
         }
 
+        // 阶段 4-4：插件用 intent 表达"详情 / 下载"，C# 只转发给主窗口的
+        // 既有路径（打开 DetailWindow / 切下载页 + StartWithIds），不做业务。
+        if (result.Intent is { } intent && !string.IsNullOrWhiteSpace(intent.Kind))
+        {
+            DispatchIntent(intent);
+        }
+
         if (result.Refresh)
         {
             await LoadAsync(_template == "browser" ? _filePage : _listPage);
@@ -937,6 +1078,32 @@ public partial class PluginPageHost : UserControl
                 Title = _title,
                 Data = data,
             });
+        }
+    }
+
+    /// <summary>
+    /// 把插件返回的 intent 交给 <see cref="IUiIntentHandler"/>：
+    /// 生产环境是所属 <see cref="MainWindow"/>（打开详情窗 / 切下载页），
+    /// STA 测试注入假实现；未注入且不在主窗口里时只报协议提示，不崩。
+    /// </summary>
+    private void DispatchIntent(PluginPageIntentDto intent)
+    {
+        IUiIntentHandler? handler = IntentHandler ?? Window.GetWindow(this) as IUiIntentHandler;
+        if (handler is null)
+        {
+            ShowError(
+                "NOT_IMPLEMENTED",
+                "当前窗口不支持插件页面动作意图（未提供 IUiIntentHandler）");
+            return;
+        }
+
+        try
+        {
+            handler.HandleIntent(intent);
+        }
+        catch (Exception ex)
+        {
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
         }
     }
 
@@ -1043,6 +1210,17 @@ public partial class PluginPageHost : UserControl
         TextStatus.Text = string.Empty;
         TextStatus.Visibility = Visibility.Collapsed;
     }
+}
+
+/// <summary>
+/// 插件页面动作 intent 的转发接口（阶段 4-4）。
+/// 实现方（生产是 <see cref="MainWindow"/>，测试是假实现）只负责把
+/// <c>detail</c> / <c>download</c> 交给现有界面路径，不做任何业务判断。
+/// </summary>
+internal interface IUiIntentHandler
+{
+    /// <summary>处理一次插件页面动作意图（detail / download）。</summary>
+    void HandleIntent(PluginPageIntentDto intent);
 }
 
 /// <summary>

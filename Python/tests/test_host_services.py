@@ -1,7 +1,9 @@
-"""主程序服务路由单元测试（jm.search / jm.detail / jm.download / jm.account）。
+"""主程序服务路由单元测试（jm.search / jm.detail / jm.download / jm.account /
+jm.session）。
 
 验证：统一 call_service 签名、成功/失败形态、关键词快照、账号登录态真实化、
-服务不存在/方法不存在抛 ServiceError。零联网（假数据源）。
+jm.session 只返回已登录客户端对象、服务不存在/方法不存在抛 ServiceError。
+零联网（假数据源）。
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from jml.core.errors import (
     ERROR_BATCH_NOT_FOUND,
     ERROR_INVALID_ARGUMENT,
     ERROR_NOT_LOGGED_IN,
+    NotLoggedInError,
 )
 from jml.core.protocol import ServiceError
 from jml.services.host_services import (
@@ -38,7 +41,14 @@ def test_register_host_services():
     assert names["jm.detail"] == 1
     assert names["jm.download"] == 1
     assert names["jm.account"] == 1
-    assert set(HOST_SERVICES) == {"jm.search", "jm.detail", "jm.download", "jm.account"}
+    assert names["jm.session"] == 1
+    assert set(HOST_SERVICES) == {
+        "jm.search",
+        "jm.detail",
+        "jm.download",
+        "jm.account",
+        "jm.session",
+    }
 
 
 def test_search_service_route(fake_source):
@@ -199,6 +209,51 @@ def test_unknown_method_raises_service_error(fake_source):
         call_service("jm.search", 1, "no_such_method", {})
     with pytest.raises(ServiceError):
         call_service("jm.account", 1, "no_such_method", {})
+
+
+# ---------------------------------------------------------------------------
+# jm.session（阶段 4-4）：强类型对象服务，只给已登录客户端
+# ---------------------------------------------------------------------------
+
+
+def test_session_service_returns_client_only_after_login(fake_source):
+    """未登录 → NOT_LOGGED_IN；登录后返回宿主缓存的同一个客户端对象。"""
+    client = object()
+    fake_source.session_client = client
+    fake_source.logged_in = False
+
+    service = REGISTRY.resolve("jm.session", 1)
+    with pytest.raises(NotLoggedInError):
+        service.get_client()
+
+    # 走账号服务真实登录（假数据源，离线）后再取
+    account.set_credentials("session_user", "session-pass")
+    assert call_service("jm.account", 1, "login", {})["ok"] is True
+    assert fake_source.logged_in is True
+    assert service.get_client() is client
+
+
+def test_session_service_never_payload_login_and_has_no_json_envelope(fake_source):
+    """jm.session 是对象服务：没有 call 方法，插件必须用 get_service 取对象。"""
+    fake_source.session_client = object()
+    account.set_credentials("session_user", "session-pass")
+    call_service("jm.account", 1, "login", {})
+
+    with pytest.raises(ServiceError):
+        call_service("jm.session", 1, "get_client", {})
+
+
+def test_session_service_without_logged_in_client_support(fake_source):
+    """数据源没实现 logged_in_client（可选协议）→ 明确 NOT_LOGGED_IN。"""
+
+    # 用最简对象替换数据源：没有 logged_in_client 方法
+    class BareSource:
+        pass
+
+    jm_source.set_source(BareSource())
+    service = REGISTRY.resolve("jm.session", 1)
+    with pytest.raises(NotLoggedInError):
+        service.get_client()
 
 
 def test_unknown_service_raises_service_error():

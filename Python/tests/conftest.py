@@ -242,6 +242,7 @@ class FakeSource:
         login_result: bool = True,
         login_error: BaseException | None = None,
         login_delay: float = 0.0,
+        session_client: object | None = None,
     ) -> None:
         self.books = dict(books or {})
         self.chapters = chapters
@@ -266,6 +267,8 @@ class FakeSource:
         self.login_result = login_result
         self.login_error = login_error
         self.login_delay = login_delay
+        #: jm.session 服务返回的客户端对象（阶段 4-4；默认 None）
+        self.session_client = session_client
 
         self.search_calls: list[tuple[str, int]] = []
         self.album_calls: list[str] = []
@@ -395,6 +398,14 @@ class FakeSource:
 
     def is_logged_in(self) -> bool:
         return self.logged_in
+
+    def logged_in_client(self):
+        """阶段 4-4：jm.session 服务取"已登录客户端"的假实现。"""
+        from jml.core.errors import NotLoggedInError
+
+        if not self.logged_in:
+            raise NotLoggedInError("尚未登录，无法提供已登录的 jmcomic 客户端")
+        return self.session_client
 
 
 @pytest.fixture

@@ -20,6 +20,7 @@ from jml.core.errors import (
     ERROR_JM,
     ERROR_NETWORK,
     InvalidCredentialsError,
+    NotLoggedInError,
     classify,
 )
 from jml.core.protocol import EVENT_DOWNLOAD_LOG
@@ -362,6 +363,19 @@ def test_source_login_anonymous_avs_is_not_login_proof():
     source._client = client
 
     assert source.is_logged_in() is False
+
+
+def test_source_logged_in_client_requires_login_and_returns_same_client():
+    """阶段 4-4：jm.session 只交已登录客户端；未登录抛 NOT_LOGGED_IN。"""
+    source = jm_source.JmcomicSource()
+    client = FakeLoginClient()
+    source._client = client  # 注入假客户端：不建 JmOption、不联网
+
+    with pytest.raises(NotLoggedInError):
+        source.logged_in_client()
+
+    assert source.login("user_1", "PWD-123456") is True
+    assert source.logged_in_client() is client
 
 
 def test_source_login_html_username_is_login_signal():

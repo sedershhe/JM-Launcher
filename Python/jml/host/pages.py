@@ -235,17 +235,22 @@ def load_page(plugin_id: str, page_id: str, params: dict) -> dict:
 def run_page_action(plugin_id: str, page_id: str, action_id: str, payload: dict) -> dict:
     """执行页面动作钩子，返回统一动作信封。
 
-    插件 handler 返回的 dict 可含三个键（其余键忽略）::
+    插件 handler 返回的 dict 可含四个键（其余键忽略）::
 
-        {"refresh": bool, "data": dict | null, "message": str}
+        {"refresh": bool, "data": dict | null, "message": str, "intent": dict}
 
     - ``refresh=true`` 表示界面应整页重新加载（``plugin_page_load``）；
     - ``data`` 为该页面模板的新 payload（可为 null）；
-    - ``message`` 为状态文案。
+    - ``message`` 为状态文案；
+    - ``intent``（阶段 4-4 扩展）为**给 C# 的转发意图**，例如收藏夹的
+      ``{"kind": "detail", "book_id": "123"}` / ``{"kind": "download",
+      "book_ids": ["123"]}``；宿主原样透传，不解释含义（C# 只转发给主窗口，
+      不做业务判断）。没有 intent 时信封里不出现该键。
 
     返回::
 
-        {"ok": true, "refresh": bool, "data": dict | null, "message": str}
+        {"ok": true, "refresh": bool, "data": dict | null, "message": str
+         [, "intent": dict]}
     """
     manifest, _page = require_declared_page(plugin_id, page_id)
     identity = action_id if isinstance(action_id, str) else ""
@@ -264,12 +269,18 @@ def run_page_action(plugin_id: str, page_id: str, action_id: str, payload: dict)
         )
 
     data = result.get("data")
-    return {
+    envelope = {
         "ok": True,
         "refresh": bool(result.get("refresh", False)),
         "data": data if isinstance(data, dict) else None,
         "message": str(result.get("message", "") or ""),
     }
+    intent = result.get("intent")
+    if isinstance(intent, dict) and intent:
+        # 载荷原样透传：kind / book_id / book_ids 的含义由插件与 C# 约定，
+        # 宿主管线不解释（避免把业务判断搬回宿主）。
+        envelope["intent"] = intent
+    return envelope
 
 
 def fetch_page_image(plugin_id: str, page_id: str, index: int) -> bytes | None:

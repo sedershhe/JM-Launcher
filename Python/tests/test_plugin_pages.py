@@ -238,6 +238,39 @@ def test_page_action_defaults_when_handler_returns_bare_dict(
     }
 
 
+def test_page_action_passes_through_optional_intent(
+    make_plugin, base_manifest, tmp_path
+):
+    """阶段 4-4：插件返回 intent 时宿主原样透传；没有 intent 时信封不含该键。"""
+    root = tmp_path / "plugins"
+    entry = (
+        "def setup(ctx):\n"
+        "    ctx.register_page('demo.main', lambda params: {})\n"
+        "    ctx.register_page_action(\n"
+        "        'demo.main', 'detail',\n"
+        "        lambda payload: {'intent': {'kind': 'detail',"
+        " 'book_id': payload['row']['book_id']}},\n"
+        "    )\n"
+        "    ctx.register_page_action('demo.main', 'noop', lambda payload: {})\n"
+    )
+    _bootstrap(make_plugin, base_manifest, root, entry=entry)
+
+    with_intent = json.loads(
+        jml_backend.plugin_page_action(
+            "demo_plugin", "demo.main", "detail", '{"row": {"book_id": "123"}}'
+        )
+    )
+    assert with_intent["ok"] is True
+    assert with_intent["intent"] == {"kind": "detail", "book_id": "123"}
+    assert with_intent["refresh"] is False
+    assert with_intent["data"] is None
+
+    without_intent = json.loads(
+        jml_backend.plugin_page_action("demo_plugin", "demo.main", "noop", "")
+    )
+    assert "intent" not in without_intent
+
+
 def test_page_action_unknown_action_is_not_implemented(
     make_plugin, base_manifest, tmp_path
 ):

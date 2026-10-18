@@ -1,11 +1,13 @@
-"""主程序服务（阶段 2/3 真实化；插件通过 ``call_service`` 调用）。
+"""主程序服务（阶段 2/3/4 真实化；插件通过 ``call_service`` 调用）。
 
-四个服务（版本均为 1）：
+五个服务（版本均为 1）：
 
 - ``jm.search``   搜索 / 翻页（关键词快照语义见 ``core.searcher``）
 - ``jm.detail``   详情
 - ``jm.download`` 批量下载登记 / 取消 / 查询进度
 - ``jm.account``  账号登录态（阶段 3；凭据只在内存，见 ``core.account``）
+- ``jm.session``  登录会话（阶段 4-4：把**已登录客户端对象**交给插件，
+  不交凭据；与 ``archive_reader/1`` 同类的强类型对象服务）
 
 调用统一签名（技术方案 2.2）::
 
@@ -20,12 +22,16 @@
 ``jml_backend.account_set_credentials`` / ``account_login_with`` 传入，
 插件不能顺手把密码塞进服务调用里。
 
+``jm.session`` **例外地不是 JSON 信封服务**：客户端对象无法序列化，插件必须
+``ctx.get_service("jm.session", 1).get_client()`` 直接取对象；未登录时
+``get_client()`` 抛 ``NotLoggedInError``（``NOT_LOGGED_IN``）。
+
 本模块不联网（网络在 ``core.jm_source``）、不感知 UI。
 """
 
 from __future__ import annotations
 
-from jml.core import account, detail, downloader, searcher
+from jml.core import account, detail, downloader, jm_source, searcher
 from jml.core.errors import (
     ERROR_BATCH_NOT_FOUND,
     classify,
@@ -175,17 +181,42 @@ class _AccountService(_HostService):
         return account.logout()
 
 
-#: 主程序服务表: 服务名 → 服务实例
-HOST_SERVICES: dict[str, _HostService] = {
+# ---------------------------------------------------------------------------
+# jm.session（阶段 4-4：把“已登录客户端对象”交给插件，不交凭据）
+# ---------------------------------------------------------------------------
+
+
+class _SessionService:
+    """登录会话服务：``get_client() -> 已登录客户端对象``。
+
+    与 ``archive_reader/1`` 同类的**强类型对象服务**（没有 ``call`` 方法）：
+    客户端对象无法塞进 ``call_service`` 的 JSON 信封，所以插件用
+    ``ctx.get_service("jm.session", 1).get_client()`` 直接取对象。
+
+    安全语义（任务 4-4 的关键设计）：
+    - 只返回宿主 ``jm_source`` 缓存的**已登录**客户端，不构造新会话；
+    - 不返回账号、密码或 cookie 字典；插件拿不到凭据写入通道；
+    - 未登录由 :func:`jml.core.jm_source.get_logged_in_client` 抛
+      ``NotLoggedInError``（错误码 ``NOT_LOGGED_IN``），**不自动登录**
+      —— 自动登录只由 ``jm.account.ensure_login`` 负责。
+    """
+
+    def get_client(self):
+        return jm_source.get_logged_in_client()
+
+
+#: 主程序服务表: 服务名 → 服务实例（JSON 信封服务 + 强类型对象服务）
+HOST_SERVICES: dict[str, object] = {
     "jm.search": _SearchService("jm.search"),
     "jm.detail": _DetailService("jm.detail"),
     "jm.download": _DownloadService("jm.download"),
     "jm.account": _AccountService("jm.account"),
+    "jm.session": _SessionService(),
 }
 
 
 def register_host_services() -> None:
-    """把四个主程序服务注册进服务注册表（bootstrap 时调用）。
+    """把五个主程序服务注册进服务注册表（bootstrap 时调用）。
 
     重复注册: bootstrap 幂等由 jml_backend 控制（二次调用不再进来），
     这里直接允许覆盖同版本（host 服务是宿主自己的，不是插件的）。
