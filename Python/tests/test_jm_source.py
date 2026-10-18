@@ -574,18 +574,20 @@ def _prefetch_source(client) -> jm_source.JmcomicSource:
 
 
 def test_image_workers_env_override(monkeypatch):
-    """默认 4；``1`` 退回串行；非法值回退默认；超大值封顶。"""
-    assert jm_source.DEFAULT_IMAGE_WORKERS == 4
+    """默认 8；``1`` 退回串行；非法值回退默认；超过 32 封顶。"""
+    assert jm_source.DEFAULT_IMAGE_WORKERS == 8
     monkeypatch.delenv(jm_source.IMAGE_WORKERS_ENV, raising=False)
-    assert jm_source.image_workers() == 4
+    assert jm_source.image_workers() == 8
 
     for raw, expected in (
         ("1", 1),
         ("0", 1),
         ("-3", 1),
         ("7", 7),
-        ("abc", 4),
-        ("", 4),
+        ("abc", 8),
+        ("", 8),
+        ("32", jm_source.MAX_IMAGE_WORKERS),
+        ("33", jm_source.MAX_IMAGE_WORKERS),
         (str(10**6), jm_source.MAX_IMAGE_WORKERS),
     ):
         monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, raw)

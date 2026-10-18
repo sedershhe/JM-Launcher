@@ -20,7 +20,7 @@
         ``page_count`` 必须是真实页数；确实取不到才为 0
     iter_chapter_images(book_id: str, chapter: dict, dest_dir: str) -> Iterator[str]
         下载本章图片到 dest_dir，**按原始顺序**产出本地文件路径
-        （真实实现单本内有序并发预取，默认 4 线程，见契约 §四/§五）
+        （真实实现单本内有序并发预取，默认 8 线程，见契约 §四/§五）
     cover_bytes(book_id: str) -> bytes | None
         返回封面原图字节；失败返回 None
 
@@ -72,9 +72,11 @@ from jml.core.protocol import EVENT_DOWNLOAD_LOG
 
 #: 单本内并发取图的默认线程数（可用环境变量 ``JML_IMAGE_WORKERS`` 覆盖）。
 #: 取值依据：jmcomic 自带同步下载器的图片线程数默认 30
-#: （``jm_config.py:482``），本实现取 4 属于保守值；进程总并发上界 =
-#: 下载器 3 本（``downloader.MAX_WORKERS``）× 本值。
-DEFAULT_IMAGE_WORKERS = 4
+#: （``jm_config.py:482``）；本实现取 8，进程图片级总并发上界 =
+#: 下载器 3 本（``downloader.MAX_WORKERS``）× 8 = 24，仍低于 30。
+#: 真实网络调参（651712，42 张，各一轮）：N=4 中位数 65.3s → N=8 32.4s，
+#: 失败 0，无重试/429，因此默认定为 8。
+DEFAULT_IMAGE_WORKERS = 8
 
 #: 单本内图片并发的环境变量名；``1`` 表示退回串行（便于排查/对比测速）。
 IMAGE_WORKERS_ENV = "JML_IMAGE_WORKERS"
@@ -574,7 +576,7 @@ class JmcomicSource:
           逐个等队首完成并 yield，完成一张立刻补提交下一张，保证输出顺序
           与 ``src_0001``… 严格一致，与网络完成顺序无关；
         - N 取 :func:`image_workers`（默认
-          :data:`DEFAULT_IMAGE_WORKERS`=4，``JML_IMAGE_WORKERS`` 可覆盖，
+          :data:`DEFAULT_IMAGE_WORKERS`=8，``JML_IMAGE_WORKERS`` 可覆盖，
           ``1`` 退回串行）；
         - 取消：消费者停止拉取后生成器被关闭，``finally`` 里置停止标记、
           取消排队任务并 ``shutdown(wait=False, cancel_futures=True)``，
