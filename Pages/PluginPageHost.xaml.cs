@@ -84,6 +84,9 @@ public partial class PluginPageHost : UserControl
     // 让界面上刚显示的地址变成死地址）。
     private bool _actionInFlight;
 
+    // 单级注入打开器（BrowserOpener 的后备字段；设置时优先于三级链）。
+    private Func<string, bool>? _browserOpener;
+
     /// <summary>本页所属插件 id（由 MainWindow 传入）。</summary>
     public string PluginId { get; }
 
@@ -102,8 +105,35 @@ public partial class PluginPageHost : UserControl
     /// <summary>
     /// 外部浏览器打开器（生产用 <see cref="Process.Start(ProcessStartInfo)"/> 转发；
     /// STA 测试注入假实现，避免真的唤起系统浏览器）。返回是否已转发。
+    ///
+    /// 设置后只走这一级（旧测试依赖“失败即停”，注入的假实现不会触发真实的
+    /// cmd / rundll32 兜底）；要完整验证三级链请注入 <see cref="BrowserOpeners"/>。
     /// </summary>
-    internal Func<string, bool>? BrowserOpener { get; set; }
+    internal Func<string, bool>? BrowserOpener
+    {
+        get => _browserOpener;
+        set
+        {
+            _browserOpener = value;
+            if (value is not null)
+            {
+                BrowserOpeners = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 可注入的三级浏览器打开器链。生产默认：
+    /// ① <c>Process.Start(UseShellExecute=true)</c> → ② <c>cmd.exe /c start</c> →
+    /// ③ <c>rundll32 url.dll,FileProtocolHandler</c>；测试注入假实现断言顺序。
+    /// </summary>
+    internal IReadOnlyList<BrowserOpenAttempt>? BrowserOpeners { get; set; }
+
+    /// <summary>
+    /// 剪贴板写入器（生产用 <see cref="Clipboard.SetText"/>；STA 测试注入假实现，
+    /// 避免真的污染本机剪贴板）。
+    /// </summary>
+    internal Action<string>? ClipboardWriter { get; set; }
 
     /// <summary>
     /// 页面动作 <c>intent</c> 的转发器（阶段 4-4）：生产默认由所属
@@ -147,6 +177,16 @@ public partial class PluginPageHost : UserControl
     internal bool IsOpenInBrowserVisible =>
         BtnActionOpenBrowser.Visibility == Visibility.Visible;
 
+    /// <summary>action 模板的「复制链接」按钮是否可见（data.url 存在时始终可见）。</summary>
+    internal bool IsCopyUrlVisible =>
+        BtnActionCopyUrl.Visibility == Visibility.Visible;
+
+    /// <summary>最近一次浏览器唤起链的逐次尝试回执（方法名 / 异常 / HResult / Message）。</summary>
+    internal IReadOnlyList<BrowserOpenRecord> LastBrowserOpenRecords { get; private set; } = [];
+
+    /// <summary>当前实际会使用的打开器链（生产应为三级；测试注入后按注入内容）。</summary>
+    internal IReadOnlyList<BrowserOpenAttempt> CurrentOpenAttempts => ResolveOpenAttempts();
+
     /// <summary>设计器 / 默认为空页（未传 plugin_id/page_id 时不发任何调用）。</summary>
     public PluginPageHost()
         : this(string.Empty, string.Empty, string.Empty, null)
@@ -157,9 +197,9 @@ public partial class PluginPageHost : UserControl
     public PluginPageHost(string pluginId, string pageId, string title)
         : this(pluginId, pageId, title, null)
     {
-        // 生产注入：动作返回 url 时用系统 Shell 打开。STA 测试走内部构造函数
-        // 注入 fake，绝不真的唤起本机浏览器。
-        BrowserOpener = OpenWithSystemShell;
+        // 生产不设置 BrowserOpener：ResolveOpenAttempts 会使用三级兜底链
+        // （Process.Start → cmd start → rundll32）。STA 测试走内部构造函数并注入
+        // fake，绝不真的唤起本机浏览器。
     }
 
     /// <summary>按插件 + 页面构造宿主；<paramref name="gateway"/> 仅测试注入假实现。</summary>
@@ -1170,6 +1210,13 @@ public partial class PluginPageHost : UserControl
             : Visibility.Visible;
         BtnActionOpenBrowser.IsEnabled = !string.IsNullOrEmpty(_actionUrl);
 
+        // 复制链接是「浏览器唤起失败」时的手动兜底：url 存在就始终显示，
+        // 不依赖打开是否成功（C# 只写剪贴板，不打开任何东西）。
+        BtnActionCopyUrl.Visibility = string.IsNullOrEmpty(_actionUrl)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        BtnActionCopyUrl.IsEnabled = !string.IsNullOrEmpty(_actionUrl);
+
         _actionItems.Clear();
         _actionItems.AddRange(page.Items);
         ActionFileList.ItemsSource = _actionItems.Select(item => item.Name).ToList();
@@ -1238,12 +1285,50 @@ public partial class PluginPageHost : UserControl
         _ = LoadAsync(1);
     }
 
-    /// <summary>生产默认浏览器打开器：系统 Shell（UseShellExecute=true）转发 http(s)。</summary>
+    /// <summary>生产打开器 ①：系统 Shell（UseShellExecute=true）转发 http(s)。</summary>
     private static bool OpenWithSystemShell(string url)
     {
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         return true;
     }
+
+    /// <summary>生产打开器 ②：<c>cmd.exe /c start "" "&lt;url&gt;"</c>（CreateNoWindow）。</summary>
+    private static bool OpenWithCmdStart(string url)
+    {
+        var info = new ProcessStartInfo("cmd.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        info.ArgumentList.Add("/c");
+        info.ArgumentList.Add("start");
+        info.ArgumentList.Add(""); // 窗口标题占位：start 会把第一个带引号参数当标题
+        info.ArgumentList.Add(url);
+        Process.Start(info);
+        return true;
+    }
+
+    /// <summary>生产打开器 ③：<c>rundll32.exe url.dll,FileProtocolHandler "&lt;url&gt;"</c>。</summary>
+    private static bool OpenWithRundll32(string url)
+    {
+        var info = new ProcessStartInfo("rundll32.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        info.ArgumentList.Add("url.dll,FileProtocolHandler");
+        info.ArgumentList.Add(url);
+        Process.Start(info);
+        return true;
+    }
+
+    /// <summary>生产默认的三级打开器链（顺序即兜底顺序）。</summary>
+    internal static IReadOnlyList<BrowserOpenAttempt> ProductionOpenAttempts() =>
+    [
+        new("Process.Start(UseShellExecute)", OpenWithSystemShell),
+        new("cmd.exe /c start", OpenWithCmdStart),
+        new("rundll32 url.dll,FileProtocolHandler", OpenWithRundll32),
+    ];
 
     /// <summary>
     /// 「在浏览器中打开」按钮：备用入口。用户显式点击时总是转发一次，
@@ -1257,6 +1342,39 @@ public partial class PluginPageHost : UserControl
         }
 
         OpenBrowser(_actionUrl, userInitiated: true);
+    }
+
+    /// <summary>
+    /// 「复制链接」按钮：url 存在时始终可用，用于浏览器唤起全部失败后手动粘贴打开。
+    /// 只写剪贴板，不打开任何进程；剪贴板实现可注入（STA 测试不污染本机剪贴板）。
+    /// </summary>
+    private void BtnActionCopyUrl_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_actionUrl))
+        {
+            return;
+        }
+
+        try
+        {
+            if (ClipboardWriter is { } writer)
+            {
+                writer(_actionUrl);
+            }
+            else
+            {
+                Clipboard.SetText(_actionUrl);
+            }
+
+            ShowStatus($"链接已复制：{_actionUrl}");
+        }
+        catch (Exception ex)
+        {
+            ShowError(
+                "COPY_FAILED",
+                $"复制链接失败：{_actionUrl}（{ex.GetType().Name}: " +
+                $"{LogSanitizer.Sanitize(ex.Message)}）");
+        }
     }
 
     /// <summary>
@@ -1277,9 +1395,13 @@ public partial class PluginPageHost : UserControl
     }
 
     /// <summary>
-    /// 打开一次系统浏览器。<paramref name="userInitiated"/>=true（用户点按钮）总是转发；
-    /// false（动作结果自动唤起）时，同一 url 成功打开过后不再重复，失败则允许重试。
-    /// 打开失败在页面状态区显示可读错误（url + 异常类型，均已脱敏），不静默。
+    /// 打开一次系统浏览器，按 ① Process.Start → ② cmd start → ③ rundll32 依次兜底。
+    /// <paramref name="userInitiated"/>=true（用户点按钮）总是尝试；false（动作结果自动
+    /// 唤起）时，同一 url 成功打开过后不再重复，失败则允许重试。
+    ///
+    /// 每次尝试都记录下来：方法名、异常类型、HResult、脱敏 Message。前一次成功即停止
+    /// 后续尝试（避免同一地址被打开多次）；全部失败时状态区显示
+    /// <c>[OPEN_FAILED] 三种方式均无法打开浏览器：url</c>，不静默。
     /// </summary>
     private bool OpenBrowser(string url, bool userInitiated)
     {
@@ -1293,44 +1415,102 @@ public partial class PluginPageHost : UserControl
             return false;
         }
 
-        try
+        IReadOnlyList<BrowserOpenAttempt> attempts = ResolveOpenAttempts();
+        var records = new List<BrowserOpenRecord>(attempts.Count);
+        foreach (BrowserOpenAttempt attempt in attempts)
         {
-            bool forwarded = BrowserOpener is { } opener
-                ? opener(url)
-                : OpenWithSystemShell(url);
-            if (!forwarded)
+            BrowserOpenRecord record;
+            try
             {
+                record = attempt.Open(url)
+                    ? BrowserOpenRecord.OpenSucceeded(attempt.Method)
+                    : BrowserOpenRecord.NotForwarded(attempt.Method);
+            }
+            catch (Exception ex)
+            {
+                record = BrowserOpenRecord.Failed(attempt.Method, ex);
+            }
+
+            records.Add(record);
+            AppendBrowserOpenDiagnostics(url, record);
+
+            if (record.Succeeded)
+            {
+                LastBrowserOpenRecords = records;
                 if (!userInitiated)
                 {
-                    _autoOpenedUrl = string.Empty;
+                    _autoOpenedUrl = url;
                 }
 
-                ShowBrowserOpenError(url, "打开器未转发");
-                return false;
+                // 成功时明确记录“已用方法 X 打开”（若前面有失败尝试一并说明）。
+                int failedBefore = records.Count(item => !item.Succeeded);
+                string fallbackNote = failedBefore > 0
+                    ? $"（前 {failedBefore} 次尝试失败，已记录）"
+                    : "";
+                ShowStatus($"已用方法 {record.Method} 打开浏览器：{url}{fallbackNote}");
+                return true;
             }
-
-            if (!userInitiated)
-            {
-                _autoOpenedUrl = url;
-            }
-
-            return true;
         }
-        catch (Exception ex)
+
+        LastBrowserOpenRecords = records;
+        if (!userInitiated)
         {
-            if (!userInitiated)
-            {
-                _autoOpenedUrl = string.Empty;
-            }
-
-            ShowBrowserOpenError(url, ex.GetType().Name);
-            return false;
+            _autoOpenedUrl = string.Empty;
         }
+
+        ShowBrowserOpenError(url, records);
+        return false;
     }
 
-    /// <summary>打开失败不静默：状态区显示 <c>[OPEN_FAILED] 打开浏览器失败：url（异常类型）</c>。</summary>
-    private void ShowBrowserOpenError(string url, string detail) =>
-        ShowError("OPEN_FAILED", $"打开浏览器失败：{url}（{detail}）");
+    /// <summary>注入链优先；单级注入打开器其次；生产默认三级链。</summary>
+    private IReadOnlyList<BrowserOpenAttempt> ResolveOpenAttempts()
+    {
+        if (BrowserOpeners is { Count: > 0 } injected)
+        {
+            return injected;
+        }
+
+        return BrowserOpener is { } opener
+            ? [new BrowserOpenAttempt("注入的打开器", opener)]
+            : ProductionOpenAttempts();
+    }
+
+    /// <summary>
+    /// 打开失败不静默：状态区显示 <c>[OPEN_FAILED] ...：url（逐次尝试明细）</c>，
+    /// 明细包含方法名、异常类型、HResult 与脱敏 Message。
+    /// </summary>
+    private void ShowBrowserOpenError(string url, IReadOnlyList<BrowserOpenRecord> records)
+    {
+        string details = string.Join(
+            "；", records.Select(record => record.Describe()));
+        string prefix = records.Count >= ProductionOpenAttempts().Count
+            ? "三种方式均无法打开浏览器"
+            : "打开浏览器失败";
+        ShowError("OPEN_FAILED", $"{prefix}：{url}（{details}）");
+    }
+
+    /// <summary>
+    /// 每次浏览器打开尝试都追加到 <c>logs/startup-diagnostics.log</c>（脱敏、单行）。
+    /// 诊断落盘失败不影响主流程。
+    /// </summary>
+    private static void AppendBrowserOpenDiagnostics(string url, BrowserOpenRecord record)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.LogDirectory);
+            string path = Path.Combine(AppPaths.LogDirectory, "startup-diagnostics.log");
+            File.AppendAllText(
+                path,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] "
+                + LogSanitizer.Sanitize($"浏览器打开尝试：{record.Describe()}；url={url}")
+                + Environment.NewLine,
+                new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        }
+        catch
+        {
+            // 诊断日志写不进去不影响打开流程。
+        }
+    }
 
     // ------------------------------------------------------------------
     // 动作结果
@@ -1581,6 +1761,56 @@ internal interface IUiIntentHandler
 {
     /// <summary>处理一次插件页面动作意图（detail / download）。</summary>
     void HandleIntent(PluginPageIntentDto intent);
+}
+
+/// <summary>
+/// 浏览器打开链中的一级：方法名（写进诊断）+ 实际打开委托（返回是否已转发）。
+/// 生产顺序见 <c>ProductionOpenAttempts</c>；测试注入假实现断言顺序与短路。
+/// </summary>
+internal sealed record BrowserOpenAttempt(string Method, Func<string, bool> Open);
+
+/// <summary>
+/// 一次浏览器打开尝试的回执：方法名、是否成功、异常类型 / HResult / 脱敏 Message。
+/// 全部失败时明细会显示在页面状态区并写入 startup-diagnostics.log。
+/// </summary>
+internal sealed record BrowserOpenRecord(
+    string Method,
+    bool Succeeded,
+    string ErrorType,
+    int HResult,
+    string Message)
+{
+    public static BrowserOpenRecord OpenSucceeded(string method) =>
+        new(method, true, "", 0, "");
+
+    public static BrowserOpenRecord NotForwarded(string method) =>
+        new(method, false, "", 0, "打开器未转发（返回 false）");
+
+    public static BrowserOpenRecord Failed(string method, Exception exception) =>
+        new(
+            method,
+            false,
+            exception.GetType().Name,
+            exception.HResult,
+            LogSanitizer.Sanitize(exception.Message ?? "")
+                .Replace("\r", " ")
+                .Replace("\n", " "));
+
+    /// <summary>单行明细：成功 → “方法：已打开”；失败 → 方法 + 异常/HResult/Message。</summary>
+    public string Describe()
+    {
+        if (Succeeded)
+        {
+            return $"{Method}：已打开";
+        }
+
+        if (string.IsNullOrEmpty(ErrorType))
+        {
+            return $"{Method}：{Message}";
+        }
+
+        return $"{Method}：{ErrorType} HResult=0x{HResult:X8} Message={Message}";
+    }
 }
 
 /// <summary>

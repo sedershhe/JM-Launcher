@@ -214,6 +214,42 @@ public class BridgeIntegrationTests
     }
 
     [Fact]
+    public void WriteProcessDiagnostics_AppendsTextToCallerProvidedPaths()
+    {
+        // 启动装配在 set_data_root 之后调用同一入口：路径全部由 C# 传入，
+        // Python 只负责收集并追加（这里用输出目录下的独立子目录，不碰用户目录）。
+        PythonRuntime.Initialize();
+        string directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "process-diag-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string markerPath = Path.Combine(directory, "runtime-data-root.txt");
+        string logPath = Path.Combine(directory, "startup-diagnostics.log");
+
+        string text = PythonRuntime.Invoke(() =>
+        {
+            dynamic backend = PythonGateway.EnsureBackend();
+            return (string)backend.write_process_diagnostics(
+                markerPath, logPath, "", "");
+        });
+
+        Assert.Contains("sys.executable：", text, StringComparison.Ordinal);
+        Assert.Contains("APPDATA=", text, StringComparison.Ordinal);
+        Assert.Contains("[配置根（jml.host.paths.config_root）]", text, StringComparison.Ordinal);
+        Assert.True(File.Exists(markerPath));
+        Assert.True(File.Exists(logPath));
+        // Python 以文本模式追加，Windows 会把 \n 落盘成 \r\n；比较前统一换行符。
+        Assert.Contains(
+            text,
+            File.ReadAllText(markerPath).Replace("\r\n", "\n", StringComparison.Ordinal),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            text,
+            File.ReadAllText(logPath).Replace("\r\n", "\n", StringComparison.Ordinal),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PythonGateway_CallRaw_ConvertsPythonBytes()
     {
         // 不联网地验证唯一非 JSON 入口的 bytes 转换（fetch_cover 的成功路径同型）。

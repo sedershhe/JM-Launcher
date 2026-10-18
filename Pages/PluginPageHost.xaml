@@ -272,6 +272,14 @@
                                 Orientation="Horizontal"
                                 HorizontalAlignment="Right"
                                 Margin="0,0,0,8">
+                        <!-- data.url 存在时显示；点击只写剪贴板，供浏览器唤起失败时手动打开 -->
+                        <Button x:Name="BtnActionCopyUrl"
+                                Content="复制链接"
+                                Style="{StaticResource SecondaryButton}"
+                                MinWidth="88"
+                                Margin="0,0,8,0"
+                                Visibility="Collapsed"
+                                Click="BtnActionCopyUrl_Click" />
                         <!-- data.url 存在时显示；点击只转发给系统默认浏览器（不是业务逻辑） -->
                         <Button x:Name="BtnActionOpenBrowser"
                                 Content="在浏览器中打开"

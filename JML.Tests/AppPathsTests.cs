@@ -242,6 +242,169 @@ public sealed class AppPathsTests : IDisposable
     }
 
     [Fact]
+    public void ProbeWritableDetailed_ReportsProbeFileAndFailureStage()
+    {
+        string okDirectory = Path.Combine(_root, "detailed-ok");
+        WriteProbeOutcome success = AppPaths.ProbeWritableDetailed(okDirectory);
+
+        Assert.True(success.Writable);
+        Assert.Equal(okDirectory, success.Directory);
+        Assert.StartsWith(".jml-write-probe-", success.ProbeFileName, StringComparison.Ordinal);
+        Assert.Equal(
+            Path.Combine(okDirectory, success.ProbeFileName),
+            success.ProbeFilePath);
+        // 判定仍是“实测后清理”：成功探针不留下任何文件。
+        Assert.False(File.Exists(success.ProbeFilePath));
+
+        string blocker = Path.Combine(_root, "detailed-blocker.txt");
+        File.WriteAllText(blocker, "x");
+        WriteProbeOutcome failure = AppPaths.ProbeWritableDetailed(
+            Path.Combine(blocker, "child"));
+
+        Assert.False(failure.Writable);
+        Assert.Equal("创建目录", failure.FailureStage);
+        Assert.False(string.IsNullOrEmpty(failure.ExceptionType));
+        Assert.NotEqual(0, failure.HResult);
+        Assert.StartsWith(
+            Path.Combine(blocker, "child"),
+            failure.ProbeFilePath,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Marker_ContainsProcessAndEnvironmentDiagnostics_FromInjectedSnapshot()
+    {
+        var snapshot = new ProcessDiagnosticsSnapshot(
+            UserName: "tester",
+            IdentityName: @"DOMAIN\tester",
+            Elevated: "否",
+            IntegrityLevel: "Medium",
+            IntegrityDetail: "RID=0x2000（S-1-16-8192）",
+            AppDataFolder: @"C:\Users\tester\AppData\Roaming",
+            LocalAppDataFolder: @"C:\Users\tester\AppData\Local",
+            TempPath: @"C:\Users\tester\AppData\Local\Temp\",
+            ProcessPath: @"C:\apps\JML\JML.exe",
+            Architecture: "X64",
+            Is64BitProcess: true,
+            SessionId: 3);
+
+        AppPaths.ResolveDataRootsForTests(
+            _ => true,
+            _appConfigRoot,
+            _localDataRoot,
+            _tempRoot,
+            _programDataRoot,
+            _markerDirectory,
+            snapshot);
+
+        string content = ReadMarker();
+        Assert.Contains("RootKind：AppData", content, StringComparison.Ordinal);
+        Assert.Contains("进程位数：64 位（X64）", content, StringComparison.Ordinal);
+        Assert.Contains("会话 Id：3", content, StringComparison.Ordinal);
+        Assert.Contains(@"WindowsIdentity：DOMAIN\tester", content, StringComparison.Ordinal);
+        Assert.Contains("Environment.UserName：tester", content, StringComparison.Ordinal);
+        Assert.Contains("是否管理员（IsElevated）：否", content, StringComparison.Ordinal);
+        Assert.Contains("令牌完整性级别：Medium", content, StringComparison.Ordinal);
+        Assert.Contains("RID=0x2000", content, StringComparison.Ordinal);
+        Assert.Contains(
+            @"Environment.GetFolderPath(ApplicationData)：C:\Users\tester\AppData\Roaming",
+            content,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            @"Environment.GetFolderPath(LocalApplicationData)：C:\Users\tester\AppData\Local",
+            content,
+            StringComparison.Ordinal);
+        Assert.Contains(@"Path.GetTempPath()：C:\Users\tester\AppData\Local\Temp\", content, StringComparison.Ordinal);
+        Assert.Contains("程序目录可写：是", content, StringComparison.Ordinal);
+        Assert.Contains("探针文件：.jml-write-probe-", content, StringComparison.Ordinal);
+        Assert.Contains("完整路径：", content, StringComparison.Ordinal);
+        Assert.Equal(
+            Path.Combine(_markerDirectory, AppPaths.RuntimeDataRootMarkerFileName),
+            AppPaths.RuntimeDataRootMarkerPath);
+    }
+
+    [Fact]
+    public void Marker_RecordsProbeExceptionTypeHResultAndSanitizedMessage()
+    {
+        // 注入探针抛异常：类型 + HResult 必须进诊断报告，凭据必须脱敏。
+        AppPaths.ResolveDataRootsForTests(
+            _ => throw new UnauthorizedAccessException(
+                "无法写入 password=top-secret token=VSEKRIT"),
+            _appConfigRoot,
+            _localDataRoot,
+            _tempRoot,
+            _programDataRoot,
+            _markerDirectory,
+            FakeSnapshot());
+
+        string content = ReadMarker();
+        Assert.Contains("UnauthorizedAccessException", content, StringComparison.Ordinal);
+        Assert.Contains("HResult：0x80070005", content, StringComparison.Ordinal);
+        Assert.Contains("失败阶段：注入探针", content, StringComparison.Ordinal);
+        Assert.Contains("***", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("top-secret", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("VSEKRIT", content, StringComparison.Ordinal);
+        // 失败原因同时进入 LastFailures，且带异常摘要。
+        Assert.Contains(
+            AppPaths.LastFailures,
+            item => item.Contains("UnauthorizedAccessException", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Marker_TruncatesLongProbeMessage()
+    {
+        string longMessage = "长" + new string('X', 900);
+
+        AppPaths.ResolveDataRootsForTests(
+            _ => throw new InvalidOperationException(longMessage),
+            _appConfigRoot,
+            _localDataRoot,
+            _tempRoot,
+            _programDataRoot,
+            _markerDirectory,
+            FakeSnapshot());
+
+        string content = ReadMarker();
+        Assert.Contains("…", content, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('X', 400), content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CaptureProcessDiagnostics_ReadsRealIdentityAndIntegrityLevel()
+    {
+        // P/Invoke 回归：GetSidSubAuthorityCount 返回的是指针，曾把地址低字节当计数，
+        // 导致完整性级别显示成随机值。这里直接断言真实读数落在已知级别集合里。
+        ProcessDiagnosticsSnapshot snapshot = AppPaths.CaptureProcessDiagnostics();
+
+        Assert.Contains(
+            snapshot.IntegrityLevel,
+            new[] { "Low", "Medium", "High", "System", "Protected", "Untrusted" });
+        Assert.DoesNotContain("未知", snapshot.IntegrityLevel, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(snapshot.UserName));
+        Assert.False(string.IsNullOrWhiteSpace(snapshot.IdentityName));
+        Assert.True(snapshot.SessionId >= 0);
+        Assert.False(string.IsNullOrWhiteSpace(snapshot.ProcessPath));
+    }
+
+    private static ProcessDiagnosticsSnapshot FakeSnapshot() => new(
+        UserName: "tester",
+        IdentityName: @"DOMAIN\tester",
+        Elevated: "否",
+        IntegrityLevel: "Medium",
+        IntegrityDetail: "RID=0x2000（S-1-16-8192）",
+        AppDataFolder: @"C:\Users\tester\AppData\Roaming",
+        LocalAppDataFolder: @"C:\Users\tester\AppData\Local",
+        TempPath: @"C:\Users\tester\AppData\Local\Temp\",
+        ProcessPath: @"C:\apps\JML\JML.exe",
+        Architecture: "X64",
+        Is64BitProcess: true,
+        SessionId: 3);
+
+    private string ReadMarker() => File.ReadAllText(Path.Combine(
+        _markerDirectory,
+        AppPaths.RuntimeDataRootMarkerFileName));
+
+    [Fact]
     public void DataRootHint_OnlyShownForDegradedKinds()
     {
         Assert.Equal("", SettingsPage.BuildDataRootHint(DataRootKind.AppData, "D:/x"));

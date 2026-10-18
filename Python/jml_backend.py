@@ -32,6 +32,9 @@
     set_data_root(config_root: str, plugin_data_root: str, log_dir: str = "") -> str
                                                    注入 C# 选定的数据根（实测可写），返回 JSON
     set_log_dir(path: str) -> str                  设置诊断落盘目录，返回 JSON
+    write_process_diagnostics(diagnostic_path: str, log_path: str = "",
+                              download_dir: str = "", temp_root: str = "") -> str
+                                                   追加 Python 进程诊断（runtime-data-root.txt）
     parse_book_ids(text: str) -> str               编号解析，返回 JSON
     start_download(book_ids_json: str, target_dir: str, work_dir: str = "") -> str
                                                    登记批次后**立即返回** JSON（后台线程下载）
@@ -62,6 +65,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 from jml.core import (
@@ -85,6 +89,7 @@ from jml.core.errors import (
     classify,
     error_payload,
     make_error,
+    sanitize_text,
 )
 from jml.core.protocol import ConfigError
 
@@ -910,6 +915,175 @@ def set_log_dir(path: str) -> str:
         return _dumps({"ok": True, "log_dir": diagnostics.current_log_dir() or ""})
     except Exception as exc:
         return _failure(exc)
+
+
+# ---------------------------------------------------------------------------
+# 进程级诊断（C# 在 set_data_root 之后调用一次）
+# ---------------------------------------------------------------------------
+
+#: 追加到 runtime-data-root.txt 的节标题
+_PROCESS_DIAGNOSTICS_TITLE = "—— Python 进程诊断（set_data_root 之后追加） ——"
+
+
+def _one_line(value: object) -> str:
+    """压成单行并脱敏（诊断正文不换行，便于 grep）。"""
+    return " ".join(sanitize_text(value).split())
+
+
+def _format_probe(detail: dict) -> str:
+    """把 ``paths.probe_writable_detailed`` 的回执压成一行。"""
+    writable = detail.get("writable")
+    if writable is None:
+        # 未实际探测（例如下载目录不存在）：如实说明，不冒充“可写/不可写”。
+        return (
+            f"结果：未探测；目录：{detail.get('directory') or '（空）'}；"
+            f"原因：{_one_line(detail.get('message') or detail.get('stage') or '未指定')}"
+        )
+
+    parts = [
+        f"结果：{'可写' if writable else '不可写'}",
+        f"目录：{detail.get('directory') or '（空）'}",
+        f"探针文件：{detail.get('probe_file') or '（空）'}",
+        f"完整路径：{detail.get('probe_path') or '（空）'}",
+    ]
+    if not writable:
+        parts.extend(
+            [
+                f"失败阶段：{detail.get('stage') or '未知'}",
+                f"异常：{detail.get('error_type') or '无（探针返回不可写）'}",
+                f"errno：{detail.get('errno')}",
+                f"winerror：{detail.get('winerror')}",
+                f"消息：{_one_line(detail.get('message') or '')}",
+            ]
+        )
+    return "；".join(parts)
+
+
+def _build_process_diagnostics(download_dir: str, temp_root: str) -> str:
+    """收集 Python 进程与环境诊断正文（不写盘，纯文本）。"""
+    import datetime
+    import sys
+    import tempfile
+
+    from jml.host import paths
+
+    probes: list[tuple[str, dict]] = []
+    probes.append(
+        (
+            "配置根（jml.host.paths.config_root）",
+            paths.probe_writable_detailed(paths.config_root()),
+        )
+    )
+    system_temp = tempfile.gettempdir()
+    probes.append(
+        ("系统临时根（tempfile.gettempdir）", paths.probe_writable_detailed(system_temp))
+    )
+    if temp_root and os.path.abspath(temp_root) != os.path.abspath(system_temp):
+        probes.append(
+            (
+                "下载临时根（C# AppPaths.TempDirectory）",
+                paths.probe_writable_detailed(temp_root),
+            )
+        )
+
+    download_note = ""
+    if download_dir:
+        if os.path.isdir(download_dir):
+            probes.append(
+                ("下载目录（C# 已保存的下载目录）", paths.probe_writable_detailed(download_dir))
+            )
+        else:
+            # 不替用户创建下载目录：诊断只对“已存在但可能不可写”的目标做实测。
+            download_note = (
+                f"  [下载目录] 不存在或不是目录，跳过写探针（避免诊断创建用户目录）："
+                f"{download_dir}"
+            )
+
+    lines = [
+        _PROCESS_DIAGNOSTICS_TITLE,
+        f"时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"sys.executable：{sys.executable}",
+        f"sys.version：{_one_line(sys.version)}",
+        f"os.getpid()：{os.getpid()}",
+        f"os.getcwd()：{os.getcwd()}",
+        "环境变量（仅目录类）：",
+    ]
+    for name in ("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE"):
+        lines.append(f"  {name}={_one_line(os.environ.get(name, '（未设置）'))}")
+
+    lines.append("写探针（失败时记录异常类型 + errno + winerror + 完整路径）：")
+    for label, detail in probes:
+        lines.append(f"  [{label}] {_format_probe(detail)}")
+    if download_note:
+        lines.append(download_note)
+    elif not download_dir:
+        lines.append("  [下载目录] 未指定（首次运行或 C# 侧没有已保存的下载目录）")
+    return "\n".join(lines)
+
+
+def _append_diagnostics_file(path: str, text: str) -> str:
+    """把诊断正文追加到指定文件；返回空串表示成功，否则是脱敏后的失败说明。"""
+    target = str(path or "").strip()
+    if not target:
+        return ""
+    try:
+        parent = os.path.dirname(os.path.abspath(target))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write("\n" + text + "\n")
+        return ""
+    except OSError as exc:
+        return (
+            f"{type(exc).__name__}: errno={getattr(exc, 'errno', None)}, "
+            f"winerror={getattr(exc, 'winerror', None)}"
+        )
+
+
+def write_process_diagnostics(
+    diagnostic_path: str,
+    log_path: str = "",
+    download_dir: str = "",
+    temp_root: str = "",
+) -> str:
+    """收集并追加 Python 进程诊断，返回诊断正文（纯文本）。
+
+    由 C# 在 ``set_data_root`` 之后调用一次：``diagnostic_path`` 是 C# 计算好的
+    ``runtime-data-root.txt`` **绝对路径**，``log_path`` 是
+    ``logs/startup-diagnostics.log`` 绝对路径——Python 不自行拼装任何一个。
+
+    诊断内容：``sys.executable`` / ``sys.version`` / pid / cwd、APPDATA 等目录类
+    环境变量，以及对配置根、系统临时根、C# 指定的下载临时根 / 下载目录各做一次
+    实测写探针（失败时记录异常类型 + errno + winerror + 完整路径）。
+
+    纪律：本入口不向 C# 抛异常；写盘失败只把原因附在返回文本里。
+    """
+    try:
+        text = _build_process_diagnostics(
+            str(download_dir or "").strip(),
+            str(temp_root or "").strip(),
+        )
+    except Exception as exc:
+        return (
+            f"{_PROCESS_DIAGNOSTICS_TITLE}\n"
+            f"进程诊断生成失败：{type(exc).__name__}: {_one_line(exc)}"
+        )
+
+    errors: list[str] = []
+    for label, path in (
+        ("runtime-data-root.txt", diagnostic_path),
+        ("startup-diagnostics.log", log_path),
+    ):
+        error = _append_diagnostics_file(path, text)
+        if error:
+            errors.append(f"{label} 追加失败（{error}）")
+
+    if errors:
+        text = text + "\n" + "\n".join(errors)
+        diagnostics.record("PROCESS_DIAGNOSTICS_WRITE_FAILED", "；".join(errors))
+    else:
+        diagnostics.record("PROCESS_DIAGNOSTICS", "Python 进程诊断已追加")
+    return text
 
 
 def get_diagnostics(limit: int = 100) -> str:

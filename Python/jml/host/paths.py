@@ -88,21 +88,73 @@ def probe_writable(directory: str | os.PathLike | None) -> bool:
     与 C# ``AppPaths.ProbeWritable`` 同一判定口径；不允许只看
     ``os.path.isdir``。任何一步失败返回 False，不抛异常、尽力清理探针文件。
     """
+    return bool(probe_writable_detailed(directory)["writable"])
+
+
+def probe_writable_detailed(directory: str | os.PathLike | None) -> dict:
+    """``probe_writable`` 的诊断版本：返回具体探针文件名 / 完整路径 / 失败明细。
+
+    返回字段（全部是普通可 JSON 序列化的值）::
+
+        {"writable": bool, "directory": str, "probe_file": str,
+         "probe_path": str, "stage": str, "error_type": str,
+         "errno": int | None, "winerror": int | None, "message": str}
+
+    失败时 ``stage`` 是“创建目录 / 写探针文件 / 删除探针文件”，
+    ``error_type`` 为原始异常类型名；``writable`` 的判定与旧实现完全一致。
+    """
+    probe_name = f".jml-write-probe-{uuid.uuid4().hex}.tmp"
+    result: dict = {
+        "writable": False,
+        "directory": "",
+        "probe_file": probe_name,
+        "probe_path": "",
+        "stage": "",
+        "error_type": "",
+        "errno": None,
+        "winerror": None,
+        "message": "",
+    }
+
     normalized = _normalize(directory)
     if not normalized:
-        return False
+        result.update(stage="路径为空", message="目录路径为空或空白")
+        return result
 
-    probe = os.path.join(normalized, f".jml-write-probe-{uuid.uuid4().hex}.tmp")
+    result["directory"] = normalized
+    result["probe_path"] = os.path.join(normalized, probe_name)
+
+    def fail(stage: str, exc: OSError) -> dict:
+        result.update(
+            stage=stage,
+            error_type=type(exc).__name__,
+            errno=getattr(exc, "errno", None),
+            winerror=getattr(exc, "winerror", None),
+            message=str(exc),
+        )
+        return result
+
     try:
         os.makedirs(normalized, exist_ok=True)
-        with open(probe, "w", encoding="utf-8") as handle:
+    except OSError as exc:
+        return fail("创建目录", exc)
+
+    try:
+        with open(result["probe_path"], "x", encoding="utf-8") as handle:
             handle.write("J")
             handle.flush()
-        os.unlink(probe)
-        return True
-    except OSError:
+    except OSError as exc:
         try:
-            os.unlink(probe)
+            os.unlink(result["probe_path"])
         except OSError:
             pass
-        return False
+        return fail("写探针文件", exc)
+
+    try:
+        os.unlink(result["probe_path"])
+    except OSError as exc:
+        # 与旧判定一致：删除失败也算不可写（可能被杀软占用）。
+        return fail("删除探针文件", exc)
+
+    result["writable"] = True
+    return result

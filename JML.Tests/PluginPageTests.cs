@@ -1530,6 +1530,189 @@ public class PluginPageTests
     }
 
     // ------------------------------------------------------------------
+    // 浏览器唤起：三级兜底（Process.Start → cmd start → rundll32）
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void ProductionOpenAttempts_AreOrderedAsDocumented()
+    {
+        Assert.Equal(
+            new[]
+            {
+                "Process.Start(UseShellExecute)",
+                "cmd.exe /c start",
+                "rundll32 url.dll,FileProtocolHandler",
+            },
+            PluginPageHost.ProductionOpenAttempts()
+                .Select(attempt => attempt.Method)
+                .ToArray());
+    }
+
+    [Fact]
+    public void Host_ProductionConstructor_UsesThreeLevelFallbackChain()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            // 生产入口不再预置单级 BrowserOpener：否则三级兜底永远走不到。
+            var host = new PluginPageHost("demo", "demo.main", "演示页");
+            Assert.Null(host.BrowserOpener);
+            Assert.Equal(
+                new[]
+                {
+                    "Process.Start(UseShellExecute)",
+                    "cmd.exe /c start",
+                    "rundll32 url.dll,FileProtocolHandler",
+                },
+                host.CurrentOpenAttempts.Select(attempt => attempt.Method).ToArray());
+
+            // 旧测试注入的单级打开器仍然只占一级（失败即停，不触发真实 cmd/rundll32）。
+            host.BrowserOpener = _ => false;
+            Assert.Single(host.CurrentOpenAttempts);
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserOpen_TriesThreeLevelFallbacksInOrderAndStopsOnSuccess()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            var calls = new List<string>();
+            host.BrowserOpeners = new[]
+            {
+                new BrowserOpenAttempt("Process.Start(UseShellExecute)", _ =>
+                {
+                    calls.Add("Process.Start(UseShellExecute)");
+                    return false;
+                }),
+                new BrowserOpenAttempt("cmd.exe /c start", _ =>
+                {
+                    calls.Add("cmd.exe /c start");
+                    throw new Win32Exception(5, "拒绝访问。");
+                }),
+                new BrowserOpenAttempt("rundll32 url.dll,FileProtocolHandler", _ =>
+                {
+                    calls.Add("rundll32 url.dll,FileProtocolHandler");
+                    return true;
+                }),
+            };
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+
+            // 三级按顺序；第三级成功即停止（不会再有任何后续调用）。
+            Assert.Equal(
+                new[]
+                {
+                    "Process.Start(UseShellExecute)",
+                    "cmd.exe /c start",
+                    "rundll32 url.dll,FileProtocolHandler",
+                },
+                calls);
+            Assert.Equal(3, host.LastBrowserOpenRecords.Count);
+            Assert.False(host.LastBrowserOpenRecords[0].Succeeded);
+            Assert.False(host.LastBrowserOpenRecords[1].Succeeded);
+            Assert.True(host.LastBrowserOpenRecords[2].Succeeded);
+
+            // 成功时状态区明确写“已用方法 X 打开”，并说明前面失败过几次。
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+            string status = Find<TextBlock>(host, "TextStatus").Text;
+            Assert.Contains(
+                "已用方法 rundll32 url.dll,FileProtocolHandler",
+                status,
+                StringComparison.Ordinal);
+            Assert.Contains("前 2 次尝试失败", status, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserOpen_AllThreeFail_ShowsOpenFailedAndKeepsCopyButton()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+            host.BrowserOpeners = new[]
+            {
+                new BrowserOpenAttempt("Process.Start(UseShellExecute)", _ =>
+                    throw new Win32Exception(5, "拒绝访问。")),
+                new BrowserOpenAttempt("cmd.exe /c start", _ =>
+                    throw new InvalidOperationException("cmd 启动失败")),
+                new BrowserOpenAttempt("rundll32 url.dll,FileProtocolHandler", _ => false),
+            };
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+
+            var error = Find<TextBlock>(host, "TextError");
+            Assert.Equal(Visibility.Visible, error.Visibility);
+            Assert.Contains(
+                "[OPEN_FAILED] 三种方式均无法打开浏览器：" + url,
+                error.Text,
+                StringComparison.Ordinal);
+            // 逐次尝试明细：方法名、异常类型、HResult 都必须在状态区。
+            Assert.Contains("Process.Start(UseShellExecute)", error.Text, StringComparison.Ordinal);
+            Assert.Contains("Win32Exception", error.Text, StringComparison.Ordinal);
+            Assert.Contains("HResult=0x", error.Text, StringComparison.Ordinal);
+            Assert.Contains("cmd.exe /c start", error.Text, StringComparison.Ordinal);
+            Assert.Contains("InvalidOperationException", error.Text, StringComparison.Ordinal);
+            Assert.Contains(
+                "rundll32 url.dll,FileProtocolHandler", error.Text, StringComparison.Ordinal);
+            Assert.Contains("未转发", error.Text, StringComparison.Ordinal);
+
+            Assert.Equal(3, host.LastBrowserOpenRecords.Count);
+            Assert.All(host.LastBrowserOpenRecords, record => Assert.False(record.Succeeded));
+            // 全部失败也不拿走备用入口：按钮与「复制链接」始终保留。
+            Assert.True(host.IsOpenInBrowserVisible);
+            Assert.True(host.IsCopyUrlVisible);
+        });
+    }
+
+    [Fact]
+    public void Host_ActionTemplate_CopyUrlButtonWritesClipboardAndHidesWithoutUrl()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            const string url = "http://127.0.0.1:51234/";
+            host.ApplyLoad(ActionResult(
+                state: "running",
+                statusText: "正在浏览",
+                actionCount: 1,
+                itemCount: 1,
+                port: 51234,
+                url: url));
+            Assert.True(host.IsCopyUrlVisible);
+
+            string? copied = null;
+            host.ClipboardWriter = value => copied = value;
+            Find<Button>(host, "BtnActionCopyUrl")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            Assert.Equal(url, copied);
+            Assert.Contains(
+                "链接已复制",
+                Find<TextBlock>(host, "TextStatus").Text,
+                StringComparison.Ordinal);
+
+            // 没有 url 时按钮隐藏，点击也不写剪贴板。
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+            Assert.False(host.IsCopyUrlVisible);
+            copied = null;
+            Find<Button>(host, "BtnActionCopyUrl")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Null(copied);
+        });
+    }
+
+    // ------------------------------------------------------------------
     // action 连点/双击：同一时刻只执行一个动作（zip_web 的 start 会换端口，
     // 第二次 start 会把刚显示、刚打开的地址停掉）
     // ------------------------------------------------------------------
