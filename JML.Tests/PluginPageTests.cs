@@ -741,6 +741,162 @@ public class PluginPageTests
     }
 
     // ------------------------------------------------------------------
+    // PluginPageHost：action 模板的阶段 4-3 扩展（url / allow_folder_choice）
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void Host_ActionTemplate_ShowsOpenBrowserOnlyWhenUrlPresent()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            const string url = "http://127.0.0.1:51234/";
+
+            // action payload 带 url → 「在浏览器中打开」按钮可见且可用
+            host.ApplyLoad(ActionResult(
+                state: "running",
+                statusText: "正在浏览：http://127.0.0.1:51234/",
+                actionCount: 1,
+                itemCount: 2,
+                port: 51234,
+                url: url));
+            Assert.True(host.IsOpenInBrowserVisible);
+            Assert.Equal(url, host.CurrentActionUrl);
+            var button = Find<Button>(host, "BtnActionOpenBrowser");
+            Assert.Equal(Visibility.Visible, button.Visibility);
+            Assert.True(button.IsEnabled);
+            Assert.Equal("在浏览器中打开", button.Content as string);
+
+            // 没有 url（未启动 / 已停止）→ 按钮隐藏，C# 不自己拼地址
+            host.ApplyLoad(ActionResult(
+                state: "idle",
+                statusText: "已停止",
+                actionCount: 1,
+                itemCount: 2,
+                port: 0,
+                url: ""));
+            Assert.False(host.IsOpenInBrowserVisible);
+            Assert.Equal(string.Empty, host.CurrentActionUrl);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<Button>(host, "BtnActionOpenBrowser").Visibility);
+
+            // 非 http(s) 地址不显示（不把任意协议交给 ShellExecute）
+            host.ApplyLoad(ActionResult(
+                state: "running",
+                statusText: "运行中",
+                actionCount: 1,
+                itemCount: 1,
+                port: 9000,
+                url: "file:///C:/Windows/System32/calc.exe"));
+            Assert.False(host.IsOpenInBrowserVisible);
+        });
+    }
+
+    [Fact]
+    public void Host_ActionTemplate_OpenBrowserForwardsUrlToInjectedOpener()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            const string url = "http://127.0.0.1:51234/";
+            host.ApplyLoad(ActionResult(
+                state: "running",
+                statusText: "正在浏览",
+                actionCount: 1,
+                itemCount: 1,
+                port: 51234,
+                url: url));
+
+            string? opened = null;
+            host.BrowserOpener = target =>
+            {
+                opened = target;
+                return true;
+            };
+
+            Find<Button>(host, "BtnActionOpenBrowser")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            Assert.Equal(url, opened);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+
+            // 无 url 时点击不触发打开器（按钮不承担业务判断）
+            host.ApplyLoad(ActionResult(
+                state: "idle",
+                statusText: "未启动",
+                actionCount: 1,
+                itemCount: 1,
+                port: 0,
+                url: ""));
+            opened = null;
+            Find<Button>(host, "BtnActionOpenBrowser")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Null(opened);
+        });
+    }
+
+    [Fact]
+    public void Host_ActionFolderChoice_ShowsButtonAndReloadsWithFolder()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            gateway.PendingLoads.Enqueue(ActionResult(
+                state: "idle",
+                statusText: "已选目录：D:\\zip-fixture（1 个 ZIP）",
+                actionCount: 1,
+                itemCount: 1,
+                port: 0,
+                folder: @"D:\zip-fixture",
+                allowFolderChoice: true));
+            var host = NewHost(gateway);
+            host.FolderPicker = () => @"D:\zip-fixture";
+
+            // 首个状态：allow_folder_choice=true → action 模板也显示「选择文件夹…」
+            host.ApplyLoad(ActionResult(
+                state: "idle",
+                statusText: "未选择目录",
+                actionCount: 1,
+                itemCount: 0,
+                port: 0,
+                allowFolderChoice: true));
+            Assert.True(host.IsActionFolderChoiceVisible);
+            var button = Find<Button>(host, "BtnActionChooseFolder");
+            Assert.Equal(Visibility.Visible, button.Visibility);
+            Assert.Equal("选择文件夹…", button.Content as string);
+
+            // 等价于用户点击：文件夹选择器已注入假实现
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await WaitUntilAsync(() => gateway.LoadCalls.Count >= 1);
+
+            using (JsonDocument document = JsonDocument.Parse(gateway.LoadCalls[0]))
+            {
+                JsonElement root = document.RootElement;
+                Assert.Equal(1, root.GetProperty("page").GetInt32());
+                Assert.Equal(-1, root.GetProperty("item_index").GetInt32());
+                Assert.Equal(@"D:\zip-fixture", root.GetProperty("folder").GetString());
+            }
+            Assert.Equal(@"D:\zip-fixture", host.CurrentFolder);
+
+            // Python 不允许时按钮隐藏（可见性只跟载荷布尔值走）
+            host.ApplyLoad(ActionResult(
+                state: "idle",
+                statusText: "未选择目录",
+                actionCount: 1,
+                itemCount: 0,
+                port: 0,
+                allowFolderChoice: false));
+            Assert.False(host.IsActionFolderChoiceVisible);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<Button>(host, "BtnActionChooseFolder").Visibility);
+        });
+    }
+
+    // ------------------------------------------------------------------
     // 组件构造与假网关
     // ------------------------------------------------------------------
 
@@ -869,12 +1025,19 @@ public class PluginPageTests
         string statusText,
         int actionCount,
         int itemCount,
-        int port)
+        int port,
+        string url = "",
+        string folder = "",
+        bool allowFolderChoice = false)
     {
         var items = Enumerable.Range(0, itemCount)
             .Select(index => $"{{\"name\":\"{index + 1:000}.zip\",\"path\":\"C:/z/{index + 1:000}.zip\"}}");
         var actions = Enumerable.Range(0, actionCount)
             .Select(index => $"{{\"id\":\"act{index}\",\"title\":\"动作{index}\"}}");
+        // 路径 / 网址 / 文案里的反斜杠与引号按 JSON 规则转义（测试只喂普通路径）
+        string statusJson = statusText.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        string urlJson = url.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        string folderJson = folder.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
         string json = $$"""
         {
@@ -884,9 +1047,12 @@ public class PluginPageTests
           "data": {
             "items": [{{string.Join(",", items)}}],
             "state": "{{state}}",
-            "status_text": "{{statusText}}",
+            "status_text": "{{statusJson}}",
             "actions": [{{string.Join(",", actions)}}],
-            "port": {{port}}
+            "port": {{port}},
+            "url": "{{urlJson}}",
+            "folder": "{{folderJson}}",
+            "allow_folder_choice": {{(allowFolderChoice ? "true" : "false")}}
           }
         }
         """;

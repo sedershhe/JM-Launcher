@@ -205,14 +205,23 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <!-- 左：文件列表 -->
+                <!-- 左：文件列表 + 文件夹选择（阶段 4-3：action 模板同样支持 allow_folder_choice） -->
                 <DockPanel Grid.Column="0" Margin="0,0,12,0">
-                    <TextBlock DockPanel.Dock="Top"
-                               Text="文件"
-                               FontSize="13"
-                               FontWeight="SemiBold"
-                               Margin="0,0,0,6"
-                               Foreground="{DynamicResource ColorBrush1}" />
+                    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                        <TextBlock Text="文件"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource ColorBrush1}" />
+                        <!-- 显隐只由 Python 的 allow_folder_choice 决定 -->
+                        <Button x:Name="BtnActionChooseFolder"
+                                Content="选择文件夹…"
+                                Style="{StaticResource SecondaryButton}"
+                                HorizontalAlignment="Left"
+                                MinWidth="120"
+                                Margin="0,6,0,0"
+                                Visibility="Collapsed"
+                                Click="BtnActionChooseFolder_Click" />
+                    </StackPanel>
                     <ListBox x:Name="ActionFileList" />
                 </DockPanel>
 
@@ -222,6 +231,14 @@
                                 Orientation="Horizontal"
                                 HorizontalAlignment="Right"
                                 Margin="0,0,0,8">
+                        <!-- data.url 存在时显示；点击只转发给系统默认浏览器（不是业务逻辑） -->
+                        <Button x:Name="BtnActionOpenBrowser"
+                                Content="在浏览器中打开"
+                                Style="{StaticResource PrimaryButton}"
+                                MinWidth="120"
+                                Margin="0,0,8,0"
+                                Visibility="Collapsed"
+                                Click="BtnActionOpenBrowser_Click" />
                         <Button x:Name="BtnActionRefresh"
                                 Content="刷新"
                                 Style="{StaticResource SecondaryButton}"

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
@@ -50,8 +51,11 @@ public partial class PluginPageHost : UserControl
     private bool _viewingImage;
     private bool _goingBackToList;
 
-    // browser 文件夹选择（阶段 4-2 协议小扩展：allow_folder_choice / folder）
+    // browser / action 文件夹选择（阶段 4-2 / 4-3 协议小扩展：allow_folder_choice / folder）
     private string _folder = string.Empty;
+
+    // action 模板：当前可打开的网址（空串 = 不显示「在浏览器中打开」按钮）
+    private string _actionUrl = string.Empty;
 
     /// <summary>本页所属插件 id（由 MainWindow 传入）。</summary>
     public string PluginId { get; }
@@ -68,12 +72,29 @@ public partial class PluginPageHost : UserControl
     /// </summary>
     internal Func<string?>? FolderPicker { get; set; }
 
+    /// <summary>
+    /// 外部浏览器打开器（生产用 <see cref="Process.Start(ProcessStartInfo)"/> 转发；
+    /// STA 测试注入假实现，避免真的唤起系统浏览器）。返回是否已转发。
+    /// </summary>
+    internal Func<string, bool>? BrowserOpener { get; set; }
+
     /// <summary>当前已选文件夹（Python 的 <c>data.folder</c>，回传时带上）。</summary>
     internal string CurrentFolder => _folder;
+
+    /// <summary>action 模板当前的 <c>data.url</c>（空串 = 无网址）。</summary>
+    internal string CurrentActionUrl => _actionUrl;
 
     /// <summary>「选择文件夹…」按钮是否可见（由 Python 的 allow_folder_choice 决定）。</summary>
     internal bool IsFolderChoiceVisible =>
         BtnChooseFolder.Visibility == Visibility.Visible;
+
+    /// <summary>action 模板的「选择文件夹…」按钮是否可见（同样由 Python 决定）。</summary>
+    internal bool IsActionFolderChoiceVisible =>
+        BtnActionChooseFolder.Visibility == Visibility.Visible;
+
+    /// <summary>action 模板的「在浏览器中打开」按钮是否可见（只看 data.url）。</summary>
+    internal bool IsOpenInBrowserVisible =>
+        BtnActionOpenBrowser.Visibility == Visibility.Visible;
 
     /// <summary>设计器 / 默认为空页（未传 plugin_id/page_id 时不发任何调用）。</summary>
     public PluginPageHost()
@@ -426,6 +447,14 @@ public partial class PluginPageHost : UserControl
     /// </summary>
     internal async Task LoadBrowserFolderAsync(string folder)
     {
+        await LoadFolderAsync(folder);
+    }
+
+    /// <summary>
+    /// browser / action 共用的文件夹加载：只回传路径与页码，内容由 Python 决定。
+    /// </summary>
+    private async Task LoadFolderAsync(string folder)
+    {
         if (string.IsNullOrWhiteSpace(folder))
         {
             return;
@@ -455,7 +484,8 @@ public partial class PluginPageHost : UserControl
         }
     }
 
-    private async void BtnChooseFolder_Click(object sender, RoutedEventArgs e)
+    /// <summary>选择文件夹（browser / action 共用；只把路径回传 Python）。</summary>
+    private async Task HandleFolderChoiceAsync()
     {
         string? folder;
         try
@@ -469,7 +499,17 @@ public partial class PluginPageHost : UserControl
             return;
         }
 
-        await LoadBrowserFolderAsync(folder ?? string.Empty);
+        await LoadFolderAsync(folder ?? string.Empty);
+    }
+
+    private async void BtnChooseFolder_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleFolderChoiceAsync();
+    }
+
+    private async void BtnActionChooseFolder_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleFolderChoiceAsync();
     }
 
     /// <summary>系统文件夹选择框：只返回路径，不做任何业务判断。</summary>
@@ -709,6 +749,29 @@ public partial class PluginPageHost : UserControl
 
         ShowOnly(PanelAction);
 
+        // 阶段 4-3 协议小扩展：action 模板也支持文件夹选择与外部浏览器打开。
+        // 显隐、网址是否存在全部由 Python 决定，C# 只负责转发。
+        bool allowFolderChoice = ReadJsonBool(data, "allow_folder_choice");
+        if (TryReadJsonString(data, "folder", out string folder))
+        {
+            _folder = folder;
+        }
+
+        BtnActionChooseFolder.Visibility = allowFolderChoice
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        _actionUrl = string.Empty;
+        if (TryReadJsonString(data, "url", out string url) && IsHttpUrl(url))
+        {
+            _actionUrl = url;
+        }
+
+        BtnActionOpenBrowser.Visibility = string.IsNullOrEmpty(_actionUrl)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        BtnActionOpenBrowser.IsEnabled = !string.IsNullOrEmpty(_actionUrl);
+
         _actionItems.Clear();
         _actionItems.AddRange(page.Items);
         ActionFileList.ItemsSource = _actionItems.Select(item => item.Name).ToList();
@@ -775,6 +838,35 @@ public partial class PluginPageHost : UserControl
     private void BtnActionRefresh_Click(object sender, RoutedEventArgs e)
     {
         _ = LoadAsync(1);
+    }
+
+    /// <summary>
+    /// 「在浏览器中打开」：**只转发** Python 给出的网址，不在 C# 里判断业务状态。
+    /// 生产用 <see cref="Process.Start(ProcessStartInfo)"/>（UseShellExecute=true）
+    /// 唤起系统默认浏览器；STA 测试注入 <see cref="BrowserOpener"/> 断言转发。
+    /// </summary>
+    private void BtnActionOpenBrowser_Click(object sender, RoutedEventArgs e)
+    {
+        string url = _actionUrl;
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return;
+        }
+
+        try
+        {
+            if (BrowserOpener is { } opener)
+            {
+                _ = opener(url);
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -851,6 +943,11 @@ public partial class PluginPageHost : UserControl
     // ------------------------------------------------------------------
     // 通用
     // ------------------------------------------------------------------
+
+    /// <summary>只接受 http/https 绝对地址（其它协议不显示「在浏览器中打开」）。</summary>
+    private static bool IsHttpUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
     /// <summary>读可选的布尔字段（缺省 / 类型不符 → fallback）。</summary>
     private static bool ReadJsonBool(JsonElement data, string name, bool fallback = false)
