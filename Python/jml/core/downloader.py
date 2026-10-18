@@ -3,6 +3,9 @@
 硬性规则（逐条锁定）：
 
 - 并发：批次内 3 线程池 + 模块级全局信号量，**所有批次合计**同时最多 3 本；
+  单本内部的图片下载由数据源做**有序并发预取**（默认 4，``JML_IMAGE_WORKERS``
+  可覆盖），因此进程内图片级总并发上界为 ``3 × N``（默认 12），
+  输出顺序仍按图片原始索引；
 - 真取消：批次级 ``threading.Event``，在"每本开始 / 每章开始 / 每图下载前"
   三个检查点轮询；一旦 set，正在跑的本子在下个检查点立即退出，
   **不等当前本子下载完**（决策 #2）；
@@ -146,6 +149,25 @@ def _remove_quiet(path: str) -> None:
 def _raise_if_cancelled(cancel_event: threading.Event) -> None:
     if cancel_event.is_set():
         raise CancelledError("下载已取消")
+
+
+def _close_quietly(iterator) -> None:
+    """关闭图片迭代器（释放数据源的预取线程池；失败只记诊断）。
+
+    取消/失败时显式 ``close()``，不等垃圾回收：数据源的预取池会在
+    ``GeneratorExit`` 路径里置停止标记并取消排队任务，从而"不再发起新请求"。
+    """
+    close = getattr(iterator, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:  # 关闭失败不能覆盖原始的取消/失败原因
+        diagnostics.record(
+            "IMAGE_ITER_CLOSE_FAILED",
+            "关闭图片迭代器失败",
+            exc,
+        )
 
 
 def _ensure_target_dir_writable(directory: str) -> None:
@@ -638,17 +660,22 @@ def _run_one_book(
             )
             chapter_dir = os.path.join(temp_dir, f"chapter_{chapter_index:03d}")
             image_iter = iter(source.iter_chapter_images(book_id, chapter, chapter_dir))
-            while True:
-                # 检查点 3：每图下载前
-                _raise_if_cancelled(cancel_event)
-                try:
-                    image_path = next(image_iter)
-                except StopIteration:
-                    break
-                image_paths.append(image_path)
-                # 取消后不再刷进度：只保留既有的"已取消/失败"日志
-                if not cancel_event.is_set():
-                    progress.image_done(chapter_index)
+            try:
+                while True:
+                    # 检查点 3：每图下载前
+                    _raise_if_cancelled(cancel_event)
+                    try:
+                        image_path = next(image_iter)
+                    except StopIteration:
+                        break
+                    image_paths.append(image_path)
+                    # 取消后不再刷进度：只保留既有的"已取消/失败"日志
+                    if not cancel_event.is_set():
+                        progress.image_done(chapter_index)
+            finally:
+                # 取消/失败时立刻关闭迭代器：数据源的有序预取池随之停止，
+                # 不再发起新请求（已发出的请求自行结束、结果丢弃）。
+                _close_quietly(image_iter)
 
         _raise_if_cancelled(cancel_event)
         if not image_paths:

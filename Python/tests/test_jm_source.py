@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import logging
 import os
+import threading
+import time
 from types import SimpleNamespace
 
 import jmcomic
@@ -500,3 +502,211 @@ def test_jmcomic_logger_capture_masks_and_emits_event():
     assert not any(
         isinstance(handler, logging.StreamHandler) for handler in logger.handlers
     )
+
+
+# ---------------------------------------------------------------------------
+# 单本内图片并发（有序预取）：离线假客户端，不联网
+# ---------------------------------------------------------------------------
+
+
+class PrefetchImage:
+    """只带下载所需字段的假图片实体。"""
+
+    def __init__(self, index: int, suffix: str = ".png") -> None:
+        self.index = index
+        self.img_file_suffix = suffix
+        self.download_url = f"https://example.invalid/{index:05d}.png"
+
+
+class PrefetchClient:
+    """按张计时的假客户端：记录并发峰值/完成顺序，可注入单张失败。"""
+
+    def __init__(
+        self,
+        count: int = 8,
+        delay: float = 0.05,
+        *,
+        reverse_delay: bool = False,
+        fail_at: int | None = None,
+    ) -> None:
+        self.images = [PrefetchImage(index) for index in range(1, count + 1)]
+        self.delay = delay
+        self.reverse_delay = reverse_delay
+        self.fail_at = fail_at
+        self.lock = threading.Lock()
+        #: 已发起的下载请求数（"不再发起新请求"用例的判据）
+        self.starts = 0
+        self.active = 0
+        self.max_active = 0
+        #: 完成顺序（故意与源顺序不同时用于证明是"按序 yield"而非按完成顺序）
+        self.finished: list[int] = []
+
+    def get_photo_detail(self, photo_id: str):
+        return list(self.images)
+
+    def _sleep_for(self, index: int) -> float:
+        if not self.reverse_delay:
+            return self.delay
+        # 越靠前的图越慢，完成顺序与源顺序相反
+        return self.delay * (len(self.images) - index + 1)
+
+    def download_by_image_detail(self, image, target: str, decode_image: bool = True):
+        with self.lock:
+            self.starts += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(self._sleep_for(image.index))
+            if self.fail_at is not None and image.index == self.fail_at:
+                raise RuntimeError(f"第 {image.index} 张下载失败")
+            with open(target, "wb") as handle:
+                handle.write(_png_bytes())
+        finally:
+            with self.lock:
+                self.active -= 1
+                self.finished.append(image.index)
+
+
+def _prefetch_source(client) -> jm_source.JmcomicSource:
+    source = jm_source.JmcomicSource()
+    source._client = client  # 注入假客户端：只测并发/顺序，绝不联网
+    return source
+
+
+def test_image_workers_env_override(monkeypatch):
+    """默认 4；``1`` 退回串行；非法值回退默认；超大值封顶。"""
+    assert jm_source.DEFAULT_IMAGE_WORKERS == 4
+    monkeypatch.delenv(jm_source.IMAGE_WORKERS_ENV, raising=False)
+    assert jm_source.image_workers() == 4
+
+    for raw, expected in (
+        ("1", 1),
+        ("0", 1),
+        ("-3", 1),
+        ("7", 7),
+        ("abc", 4),
+        ("", 4),
+        (str(10**6), jm_source.MAX_IMAGE_WORKERS),
+    ):
+        monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, raw)
+        assert jm_source.image_workers() == expected, raw
+
+
+def test_iter_chapter_images_prefetch_beats_serial(tmp_path, monkeypatch):
+    """8 张 × 50ms：4 线程总耗时低于串行的一半（宽松阈值防 flake）。"""
+    monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, "1")
+    serial_client = PrefetchClient(count=8, delay=0.05)
+    serial_source = _prefetch_source(serial_client)
+    started = time.perf_counter()
+    serial_paths = list(
+        serial_source.iter_chapter_images("1", {"photo_id": "11"}, str(tmp_path / "s"))
+    )
+    serial_elapsed = time.perf_counter() - started
+
+    monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, "4")
+    concurrent_client = PrefetchClient(count=8, delay=0.05)
+    concurrent_source = _prefetch_source(concurrent_client)
+    started = time.perf_counter()
+    concurrent_paths = list(
+        concurrent_source.iter_chapter_images(
+            "1", {"photo_id": "11"}, str(tmp_path / "c")
+        )
+    )
+    concurrent_elapsed = time.perf_counter() - started
+
+    assert len(serial_paths) == len(concurrent_paths) == 8
+    # 串行路径确实是一次只下载一张（不是"看起来串行"）
+    assert serial_client.max_active == 1
+    assert 2 <= concurrent_client.max_active <= 4
+    assert concurrent_elapsed < serial_elapsed * 0.5, (
+        f"并发 {concurrent_elapsed:.3f}s 未低于串行 {serial_elapsed:.3f}s 的一半"
+    )
+
+
+def test_iter_chapter_images_preserves_source_order(tmp_path, monkeypatch):
+    """后面的图先完成时，yield 仍按源顺序（ZIP 内 001… 顺序不变）。"""
+    monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, "4")
+    client = PrefetchClient(count=8, delay=0.02, reverse_delay=True)
+    source = _prefetch_source(client)
+
+    paths = list(
+        source.iter_chapter_images("1", {"photo_id": "11"}, str(tmp_path / "ch"))
+    )
+
+    assert [os.path.basename(path) for path in paths] == [
+        f"src_{index:04d}.png" for index in range(1, 9)
+    ]
+    assert all(os.path.getsize(path) > 0 for path in paths)
+    # 完成顺序确实被打乱过，否则上面的顺序断言没有意义
+    assert client.finished != sorted(client.finished)
+
+
+def test_iter_chapter_images_close_stops_prefetch(tmp_path, monkeypatch):
+    """关掉生成器（取消路径）：1 秒内返回，且不再发起新下载请求。"""
+    monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, "4")
+    client = PrefetchClient(count=12, delay=0.05)
+    source = _prefetch_source(client)
+    iterator = source.iter_chapter_images(
+        "1", {"photo_id": "11"}, str(tmp_path / "ch")
+    )
+
+    first = next(iterator)
+    assert os.path.isfile(first)
+
+    started = time.perf_counter()
+    iterator.close()
+    close_elapsed = time.perf_counter() - started
+
+    assert close_elapsed < 1.0, f"关闭生成器耗时 {close_elapsed:.3f}s"
+    # 预取窗口最多 4 张；给在跑的任务一点时间收尾，之后计数必须冻结
+    time.sleep(0.2)
+    settled = client.starts
+    time.sleep(0.3)
+    assert client.starts == settled, "生成器关闭后不得再发起新请求"
+    assert settled <= 4
+
+
+def test_iter_chapter_images_failure_releases_pool(tmp_path, monkeypatch):
+    """单张失败：异常在对应索引抛出；池释放，后续下载可正常跑。"""
+    monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, "4")
+    client = PrefetchClient(count=8, delay=0.01, fail_at=3)
+    source = _prefetch_source(client)
+
+    with pytest.raises(RuntimeError):
+        list(
+            source.iter_chapter_images("1", {"photo_id": "11"}, str(tmp_path / "bad"))
+        )
+
+    # 同一数据源换一个正常客户端立刻能继续跑（池没被卡死）
+    client_ok = PrefetchClient(count=4, delay=0.01)
+    source._client = client_ok
+    paths = list(
+        source.iter_chapter_images("1", {"photo_id": "11"}, str(tmp_path / "ok"))
+    )
+    assert len(paths) == 4
+    assert [os.path.basename(path) for path in paths] == [
+        f"src_{index:04d}.png" for index in range(1, 5)
+    ]
+
+    # 失败时被放弃的预取线程应在短时间内全部退出（不泄漏）
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if not any(t.name.startswith("jml-image") for t in threading.enumerate()):
+            break
+        time.sleep(0.02)
+    assert not any(t.name.startswith("jml-image") for t in threading.enumerate())
+
+
+def test_iter_chapter_images_serial_falls_back_when_single_image(tmp_path, monkeypatch):
+    """只有 1 张图时不建线程池（直接串行），行为与旧实现一致。"""
+    monkeypatch.setenv(jm_source.IMAGE_WORKERS_ENV, "4")
+    client = PrefetchClient(count=1, delay=0.01)
+    source = _prefetch_source(client)
+
+    paths = list(
+        source.iter_chapter_images("1", {"photo_id": "11"}, str(tmp_path / "one"))
+    )
+
+    assert [os.path.basename(path) for path in paths] == ["src_0001.png"]
+    assert client.max_active == 1
+

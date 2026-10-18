@@ -481,6 +481,47 @@ def test_cancel_interrupts_at_checkpoints(tmp_path):
     assert list(tmp_path.glob("*.zip")) == []
 
 
+def test_cancel_closes_image_iterator(tmp_path):
+    """取消时显式关闭数据源迭代器（预取池随之停止，不再发起新请求）。"""
+
+    class ClosableSource(FakeDownloadSource):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.closed = 0
+
+        def iter_chapter_images(self, book_id: str, chapter: dict, dest_dir: str):
+            try:
+                yield from super().iter_chapter_images(book_id, chapter, dest_dir)
+            finally:
+                with self.lock:
+                    self.closed += 1
+
+    cancel_event = threading.Event()
+    source = ClosableSource(
+        {"1": "书1"}, chapters=1, images_per_chapter=40, sleep=0.01
+    )
+    holder = {}
+
+    def runner() -> None:
+        holder["result"] = downloader.run_batch(
+            ["1"], str(tmp_path), cancel_event=cancel_event, source=source
+        )
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    assert _wait_until(lambda: source.downloaded >= 3, timeout=5)
+
+    started_at = time.time()
+    cancel_event.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert time.time() - started_at < 3
+    # downloader 的 finally 显式 close()，不依赖垃圾回收
+    assert source.closed == 1
+    assert holder["result"]["cancelled"] == 1
+
+
 def test_cancel_stops_before_next_chapter(tmp_path):
     """章节检查点：取消后不再开启新章节。"""
     cancel_event = threading.Event()

@@ -19,7 +19,8 @@
               "cover_url","chapters":[{"photo_id","index","title"}]}
         ``page_count`` 必须是真实页数；确实取不到才为 0
     iter_chapter_images(book_id: str, chapter: dict, dest_dir: str) -> Iterator[str]
-        逐张下载本章图片到 dest_dir，产出本地文件路径
+        下载本章图片到 dest_dir，**按原始顺序**产出本地文件路径
+        （真实实现单本内有序并发预取，默认 4 线程，见契约 §四/§五）
     cover_bytes(book_id: str) -> bytes | None
         返回封面原图字节；失败返回 None
 
@@ -46,6 +47,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Iterator
 
 from jml import events
@@ -63,6 +65,42 @@ from jml.core.errors import (
     sanitize_text,
 )
 from jml.core.protocol import EVENT_DOWNLOAD_LOG
+
+# ---------------------------------------------------------------------------
+# 单本内图片并发（有序预取）
+# ---------------------------------------------------------------------------
+
+#: 单本内并发取图的默认线程数（可用环境变量 ``JML_IMAGE_WORKERS`` 覆盖）。
+#: 取值依据：jmcomic 自带同步下载器的图片线程数默认 30
+#: （``jm_config.py:482``），本实现取 4 属于保守值；进程总并发上界 =
+#: 下载器 3 本（``downloader.MAX_WORKERS``）× 本值。
+DEFAULT_IMAGE_WORKERS = 4
+
+#: 单本内图片并发的环境变量名；``1`` 表示退回串行（便于排查/对比测速）。
+IMAGE_WORKERS_ENV = "JML_IMAGE_WORKERS"
+
+#: 环境变量允许的最大值（防止误配把线程数拉爆；正常不需要超过 8）。
+MAX_IMAGE_WORKERS = 32
+
+
+def image_workers() -> int:
+    """返回单本内并发取图的线程数（每次调用现读环境变量，便于测试与排查）。
+
+    - 未设置 / 空串 / 非整数 → :data:`DEFAULT_IMAGE_WORKERS`；
+    - ``<= 1`` → 1（串行，行为与旧实现一致）；
+    - 其余 → 原值，但封顶 :data:`MAX_IMAGE_WORKERS`。
+    """
+    raw = os.environ.get(IMAGE_WORKERS_ENV)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_IMAGE_WORKERS
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return DEFAULT_IMAGE_WORKERS
+    if value <= 1:
+        return 1
+    return min(value, MAX_IMAGE_WORKERS)
+
 
 # ---------------------------------------------------------------------------
 # jmcomic 异常类型表（唯一 import jmcomic 的模块）
@@ -183,11 +221,33 @@ def _install_log_capture() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _PrefetchStopped(Exception):
+    """图片预取任务在生成器关闭后才启动：直接放弃，不再发起网络请求。"""
+
+
 class JmcomicSource:
     """基于 jmcomic 的真实数据源（第三方库，允许 import）。
 
-    客户端惰性创建并缓存；同一实例被下载线程池并发使用（jmcomic 官方支持
-    并发调用，与旧项目行为一致）。
+    客户端惰性创建并缓存；同一实例被下载线程池并发使用。线程安全依据
+    （jmcomic 2.7.1 源码）：
+
+    - jmcomic 自带的同步下载器就是**同一个 client 多线程跑图片**：
+      ``jm_downloader.py:320-324`` 把 ``download_by_image_detail`` 交给
+      ``execute_on_condition``，后者用 ``multi_thread_launcher`` /
+      ``thread_pool_executor`` 开线程（``jm_downloader.py:369-381``），
+      图片线程数默认 30（``jm_config.py:482``）；
+    - 图片请求链路每次调用独立构造 kwargs：``decide_headers_and_ts``
+      （``jm_client_impl.py:905-929``）按次生成 token/headers；
+    - postman 每次请求都 ``meta_data.copy()``（``common/postman/postman_api.py:141-150``），
+      默认 postman 是 ``curl_cffi``（``jm_config.py:490``），底层直接调用
+      ``curl_cffi.requests.get``（``common/postman/postman_impl.py:40-52``），
+      没有共享 Session 状态；
+    - cookie 只在建客户端时初始化一次，且有类级锁
+      （``jm_client_impl.py:1052-1062``），客户端缓存默认关闭
+      （``jm_config.py:472``），下载期间没有 client 级共享可变状态。
+
+    因此**不需要每线程一个 client**，共用一个客户端即可；本类只在
+    ``iter_chapter_images`` 里控制单本内的有序并发。
     """
 
     def __init__(self) -> None:
@@ -505,9 +565,22 @@ class JmcomicSource:
     def iter_chapter_images(
         self, book_id: str, chapter: dict, dest_dir: str
     ) -> Iterator[str]:
-        """逐张下载一章的图片到 dest_dir，产出本地路径。
+        """下载一章的图片到 dest_dir，**按原始顺序**产出本地路径。
 
-        每张图片下载前不做事；取消检查点由 downloader 在"拉取下一张之前"完成。
+        并发模型（契约 §四/§五）：
+
+        - 章节详情（``get_photo_detail``）仍是一次同步请求，先拿到图片清单；
+        - 之后用 ``ThreadPoolExecutor`` 预取：先提交前 N 张，再**按索引顺序**
+          逐个等队首完成并 yield，完成一张立刻补提交下一张，保证输出顺序
+          与 ``src_0001``… 严格一致，与网络完成顺序无关；
+        - N 取 :func:`image_workers`（默认
+          :data:`DEFAULT_IMAGE_WORKERS`=4，``JML_IMAGE_WORKERS`` 可覆盖，
+          ``1`` 退回串行）；
+        - 取消：消费者停止拉取后生成器被关闭，``finally`` 里置停止标记、
+          取消排队任务并 ``shutdown(wait=False, cancel_futures=True)``，
+          不再发起新请求；已发出的请求自行结束、结果丢弃；
+        - 单张失败在它对应的索引位置抛出（沿用"该本失败"语义），池在
+          ``finally`` 里释放，不会卡死后续下载。
         """
         client = self._ensure_client()
         photo_id = str(chapter.get("photo_id") or "")
@@ -516,24 +589,91 @@ class JmcomicSource:
 
         photo = client.get_photo_detail(photo_id)
         os.makedirs(dest_dir, exist_ok=True)
-        for index, image in enumerate(photo, start=1):
-            suffix = getattr(image, "img_file_suffix", "") or ".jpg"
-            target = os.path.join(dest_dir, f"src_{index:04d}{suffix}")
-            decode = True
-            try:
-                if self._option is not None:
-                    decode = bool(self._option.decide_download_image_decode(image))
-            except Exception as exc:
-                diagnostics.record(
-                    "IMAGE_DECODE_FALLBACK",
-                    f"图片解码策略回退为默认: photo_id={photo_id}",
-                    exc,
+        # 图片清单已在详情响应里，物化不会额外发请求（DetailEntity.__iter__
+        # 只从 page_arr 构造实体，见 jm_entity.py:63-65）。
+        images = list(photo)
+
+        workers = image_workers()
+        if workers <= 1 or len(images) <= 1:
+            # 串行路径：与并发改造前完全一致，便于对比测速/排查。
+            for index, image in enumerate(images, start=1):
+                yield self._download_one_image(
+                    client, photo_id, image, index, dest_dir
                 )
-                decode = True
-            client.download_by_image_detail(image, target, decode_image=decode)
-            if not os.path.isfile(target) or os.path.getsize(target) <= 0:
-                raise ImageError(f"图片下载结果为空: {photo_id} / 第 {index} 张")
-            yield target
+            return
+
+        yield from self._iter_images_concurrently(
+            client, photo_id, images, dest_dir, workers
+        )
+
+    def _download_one_image(
+        self, client, photo_id: str, image, index: int, dest_dir: str
+    ) -> str:
+        """下载第 ``index`` 张（1 起）到 dest_dir，返回本地路径。"""
+        suffix = getattr(image, "img_file_suffix", "") or ".jpg"
+        target = os.path.join(dest_dir, f"src_{index:04d}{suffix}")
+        decode = True
+        try:
+            if self._option is not None:
+                decode = bool(self._option.decide_download_image_decode(image))
+        except Exception as exc:
+            diagnostics.record(
+                "IMAGE_DECODE_FALLBACK",
+                f"图片解码策略回退为默认: photo_id={photo_id}",
+                exc,
+            )
+            decode = True
+        client.download_by_image_detail(image, target, decode_image=decode)
+        if not os.path.isfile(target) or os.path.getsize(target) <= 0:
+            raise ImageError(f"图片下载结果为空: {photo_id} / 第 {index} 张")
+        return target
+
+    def _iter_images_concurrently(
+        self,
+        client,
+        photo_id: str,
+        images: list,
+        dest_dir: str,
+        workers: int,
+    ) -> Iterator[str]:
+        """有序并发预取：按索引顺序 yield，池内最多 ``workers`` 个在跑。"""
+        total = len(images)
+        stop = threading.Event()
+        pool = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="jml-image"
+        )
+        pending: dict[int, Future] = {}
+        next_to_submit = 0
+
+        def submit(index: int) -> None:
+            image = images[index - 1]
+
+            def run():
+                # 生成器被取消/关闭后，排队任务即便抢到线程也不再发请求。
+                if stop.is_set():
+                    raise _PrefetchStopped()
+                return self._download_one_image(
+                    client, photo_id, image, index, dest_dir
+                )
+
+            pending[index] = pool.submit(run)
+
+        try:
+            while next_to_submit < total and len(pending) < workers:
+                next_to_submit += 1
+                submit(next_to_submit)
+            for index in range(1, total + 1):
+                future = pending.pop(index)
+                yield future.result()
+                if next_to_submit < total:
+                    next_to_submit += 1
+                    submit(next_to_submit)
+        finally:
+            # 不阻塞消费者：cancel 排队任务，正在跑的请求自行结束、结果丢弃。
+            stop.set()
+            for future in pending.values():
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def cover_bytes(self, book_id: str) -> bytes | None:
         """取封面原图字节（不解码、不转 UI 对象、不落临时文件）。"""
