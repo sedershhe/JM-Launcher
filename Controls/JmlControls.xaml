@@ -315,106 +315,19 @@
         <Setter Property="Foreground" Value="{DynamicResource ColorBrush1}" />
     </Style>
 
-    <!-- ========== 主行动按钮（PCL2 MyExtraTextButton 52 高胶囊） ==========
-         MyExtraTextButton.xaml:7        Height=52、Margin=20（由使用方设置）
-         MyExtraTextButton.xaml:12-22    CornerRadius=ActualHeight×0.4（52×0.4=20.8）、
-                                         底 ColorBrush3、字 ColorBrush8 16px、
-                                         DropShadowEffect ShadowDepth=0 BlurRadius=10 Opacity=0.2
-         MyExtraTextButton.xaml.vb:140/143 悬停底 ColorBrush4（120ms）、常态回 ColorBrush3（150ms）
-         MyExtraTextButton.xaml.vb:150-154 禁用 ColorBrushGray4
-         动效落点：悬停用一层底色覆盖层做 120ms Opacity 淡入、150ms 淡出；
-         不动画 DropShadowEffect（规格 13.2-2 / 13.3 补充）。按下缩放本轮未做（任务只要求悬停颜色）。
-         对比度修正（2026-10-18，用户实测“部分按钮文字与背景融合”）：
-           PCL2 原值悬停色是 ColorBrush4 #4890F5，与 ColorBrush8 #EAF2FE 文字实测仅 2.83:1，
-           悬停时文字几乎糊进底色；改用同一套 PCL2 调色板里更深的 ColorBrush2 #0B5BCB（5.52:1），
-           文字仍 16px ColorBrush8、不加粗，主按钮常态仍严格是 ColorBrush3。
-         使用：下载页「开始下载」、搜索页「搜索」、详情窗「下载本子」。 -->
-    <Style x:Key="PrimaryButton" TargetType="Button">
-        <Setter Property="OverridesDefaultStyle" Value="True" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
-        <Setter Property="SnapsToDevicePixels" Value="False" />
-        <Setter Property="UseLayoutRounding" Value="False" />
-        <Setter Property="Height" Value="52" />
-        <Setter Property="MinWidth" Value="140" />
-        <Setter Property="Padding" Value="20,0" />
-        <Setter Property="FontSize" Value="16" />
-        <Setter Property="Foreground" Value="{DynamicResource ColorBrush8}" />
-        <Setter Property="Background" Value="{DynamicResource ColorBrush3}" />
-        <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Root"
-                            Background="{TemplateBinding Background}"
-                            CornerRadius="20.8"
-                            SnapsToDevicePixels="False"
-                            UseLayoutRounding="False">
-                        <Border.Effect>
-                            <!-- PCL2 MyExtraTextButton.xaml:20-22 只设 ShadowDepth/BlurRadius/Opacity，
-                                 颜色取 DropShadowEffect 默认黑。 -->
-                            <DropShadowEffect ShadowDepth="0"
-                                              BlurRadius="10"
-                                              Opacity="0.2" />
-                        </Border.Effect>
-                        <Grid>
-                            <!-- 悬停底色 ColorBrush2：120ms 淡入 / 150ms 淡出（不触发布局）。
-                                 不用 PCL2 的 ColorBrush4，原因见上方“对比度修正”。 -->
-                            <Border x:Name="HoverLayer"
-                                    Background="{DynamicResource ColorBrush2}"
-                                    CornerRadius="20.8"
-                                    Opacity="0"
-                                    IsHitTestVisible="False" />
-                            <!-- 文字用 TextBlock + TemplateBinding，而不是 ContentPresenter：
-                                 外部库的隐式 TextBlock 样式（PlainToolkit Themes\Controls\TextBlock.xaml:11）
-                                 把 Foreground 固定成 ColorBrush1 #343D4A，会压过 ContentPresenter 的继承值，
-                                 结果主按钮文字实际渲染成深灰压在蓝底上（实测 #343D4A on #1370F3 仅 2.43:1，
-                                 就是用户说的“文字与背景融合”）。主按钮内容全是普通字符串，用 TextBlock 即可。 -->
-                            <TextBlock x:Name="LabText"
-                                       Text="{TemplateBinding Content}"
-                                       TextOptions.TextFormattingMode="Display"
-                                       SnapsToDevicePixels="True"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       Margin="{TemplateBinding Padding}"
-                                       Foreground="{TemplateBinding Foreground}"
-                                       FontSize="{TemplateBinding FontSize}"
-                                       IsHitTestVisible="False" />
-                        </Grid>
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Trigger.EnterActions>
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
-                                                         Storyboard.TargetProperty="Opacity"
-                                                         To="1" Duration="0:0:0.120" />
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </Trigger.EnterActions>
-                            <Trigger.ExitActions>
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
-                                                         Storyboard.TargetProperty="Opacity"
-                                                         To="0" Duration="0:0:0.150" />
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </Trigger.ExitActions>
-                        </Trigger>
-                        <!-- 禁用底仍按 PCL2 用 ColorBrushGray4（当前三个主按钮都没有禁用入口）。
-                             文字 ColorBrush8 在 Gray4 上只有 2.16:1，属“禁用态”且 WCAG 豁免，
-                             不额外改，避免偏离 PCL2 原值。 -->
-                        <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="Root" Property="Background"
-                                    Value="{DynamicResource ColorBrushGray4}" />
-                        </Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-    </Style>
+    <!-- ========== 主行动按钮（2026-10-18 起与次按钮视觉完全一致） ==========
+         用户反馈下载页「开始下载」、搜索页「搜索」比其它按钮明显大一圈、字体也怪：
+         原来沿用 PCL2 MyExtraTextButton 的 52 高蓝底胶囊（16px 白字），与页面里
+         35 高描边次按钮并存，同一屏两种按钮规格，观感不统一。
+         本次按任务要求让两者“视觉完全一致”，采用 BasedOn 方案：PrimaryButton 只保留
+         一个键名给既有页面（下载页/搜索页/详情窗/账号窗）继续引用，本身不再有任何覆盖，
+         完全继承 SecondaryButton 的：高 35、圆角 3、底 #55FFFFFF、1px ColorBrush1 边框、
+         13px / ColorBrush1 文字、悬停 ColorBrush7、禁用 Gray6/Gray4/Gray3。
+         为什么选 BasedOn 而不是把使用方全改成 SecondaryButton：使用方分散在
+         DownloadPage / DetailWindow / AccountDialog，本次任务只允许改
+         Controls\JmlControls.xaml、Pages\SearchPage.xaml 与测试，逐处替换会越界。
+         注意：BasedOn 引用 StaticResource 不能前向引用，所以实际样式定义在
+         下方 SecondaryButton 之后（本段只是说明）。 -->
 
     <!-- ========== 次按钮（PCL2 MyButton，35 高描边） ==========
          MyButton.xaml:6  CornerRadius=3、BorderThickness=1、BorderBrush=ColorBrush1
@@ -538,6 +451,14 @@
             </Setter.Value>
         </Setter>
     </Style>
+
+    <!-- ========== 主行动按钮 = 次按钮（两种键名、同一套视觉规则） ==========
+         必须定义在 SecondaryButton 之后：BasedOn 的 StaticResource 不支持前向引用。
+         不加任何覆盖，主按钮的高度/字号/前景/背景/边框/悬停/禁用全部与次按钮一致；
+         使用方仍写 Style="{StaticResource PrimaryButton}"，无需改页面。
+         页面级 MinWidth 覆盖（搜索页 120、账号窗保存 140）是使用方自己的宽度要求，
+         不属于样式差异，也不影响高度。 -->
+    <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}" />
 
     <!-- ========== 兜底：没写 Style 的 Button 统一按 35 高次按钮 ==========
          PythonSetupPage 的「重新检测」「进入主界面」原来没写 Style，落到外部库的隐式

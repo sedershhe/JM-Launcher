@@ -710,12 +710,12 @@ public class UiSmokeTests
     }
 
     /// <summary>
-    /// 主行动按钮（PCL2 MyExtraTextButton）：高 52、圆角 20.8、底 ColorBrush3、
-    /// 字 ColorBrush8 16px、DropShadowEffect BlurRadius=10 ShadowDepth=0 Opacity=0.2、
-    /// 禁用底 ColorBrushGray4。
+    /// 主行动按钮已与次按钮完全统一（2026-10-18 用户反馈「太大、字体怪」）：
+    /// 高 35、圆角 3、底 #55FFFFFF、边框 1px ColorBrush1、13px / ColorBrush1 文字；
+    /// 旧的 52 高 / 16px / 蓝底 / 胶囊阴影一律不再出现。
     /// </summary>
     [Fact]
-    public void PrimaryButton_Template_IsPclCapsule()
+    public void PrimaryButton_Style_IsUnifiedWithSecondary()
     {
         RunOnUiThread(() =>
         {
@@ -725,29 +725,41 @@ public class UiSmokeTests
                 Content = "开始下载",
             };
 
-            button.Measure(new Size(300, 52));
-            button.Arrange(new Rect(0, 0, 300, 52));
+            button.Measure(new Size(300, 35));
+            button.Arrange(new Rect(0, 0, 300, 35));
             button.UpdateLayout();
 
-            Assert.Equal(52, button.ActualHeight);
-            Assert.Equal(16, button.FontSize);
-            var foreground = Assert.IsType<SolidColorBrush>(button.Foreground);
-            Assert.Equal(ResourceColor("ColorBrush8"), foreground.Color);
+            Assert.Equal(35, button.ActualHeight);
+            Assert.Equal(13, button.FontSize);
+            Assert.Equal(
+                ResourceColor("ColorBrush1"),
+                Assert.IsType<SolidColorBrush>(button.Foreground).Color);
+            Assert.Equal(
+                ResourceColor("ColorBrushHalfWhite"),
+                Assert.IsType<SolidColorBrush>(button.Background).Color);
+            Assert.Equal(
+                ResourceColor("ColorBrush1"),
+                Assert.IsType<SolidColorBrush>(button.BorderBrush).Color);
 
-            var root = Assert.IsType<Border>(button.Template.FindName("Root", button));
-            Assert.Equal(20.8, root.CornerRadius.TopLeft, 3);
-            Assert.Equal(ResourceColor("ColorBrush3"), Assert.IsType<SolidColorBrush>(root.Background).Color);
+            var panFore = Assert.IsType<Border>(button.Template.FindName("PanFore", button));
+            Assert.Equal(3, panFore.CornerRadius.TopLeft);
+            Assert.Equal(1, panFore.BorderThickness.Left);
+            Assert.Equal(
+                ResourceColor("ColorBrush1"),
+                Assert.IsType<SolidColorBrush>(panFore.BorderBrush).Color);
 
-            var effect = Assert.IsType<DropShadowEffect>(root.Effect);
-            Assert.Equal(10, effect.BlurRadius);
-            Assert.Equal(0, effect.ShadowDepth);
-            Assert.Equal(0.2, effect.Opacity, 3);
-
+            // 禁用态与次按钮同一套颜色：底 Gray6、边框 Gray4、文字 Gray3。
             button.IsEnabled = false;
             button.UpdateLayout();
             Assert.Equal(
+                ResourceColor("ColorBrushGray6"),
+                Assert.IsType<SolidColorBrush>(panFore.Background).Color);
+            Assert.Equal(
                 ResourceColor("ColorBrushGray4"),
-                Assert.IsType<SolidColorBrush>(root.Background).Color);
+                Assert.IsType<SolidColorBrush>(panFore.BorderBrush).Color);
+            Assert.Equal(
+                ResourceColor("ColorBrushGray3"),
+                Assert.IsType<SolidColorBrush>(button.Foreground).Color);
         });
     }
 
@@ -787,7 +799,8 @@ public class UiSmokeTests
     /// <summary>
     /// 页面外边距与卡片间距：下载页 25,10,25,25、卡片竖向间距 12；
     /// 搜索页紧凑化后左右 25 / 上下 20、搜索卡→结果卡 8、分页卡上距 8；
-    /// 900×550 默认窗口下搜索卡高度 &lt; 100、结果列表可视高度 &gt; 250（约 2 行 × 127）。
+    /// 主按钮统一为 35 高后，900×550 窗口下搜索卡高度 &lt; 84、
+    /// 结果列表可视高度 ≥ 257.3（改前实测值，按钮变矮后约 274，仍完整显示 2 行）。
     /// </summary>
     [Fact]
     public void Pages_ContentMargins_ArePclCompact()
@@ -799,6 +812,10 @@ public class UiSmokeTests
             Assert.Equal(new Thickness(25, 10, 25, 25), downloadRoot.Margin);
             Assert.Equal(new Thickness(20, 40, 18, 15), Find<JmlCard>(download, "CardInput").Padding);
             Assert.Equal(new Thickness(0, 12, 0, 0), Find<JmlCard>(download, "CardLog").Margin);
+
+            // 主按钮统一后，下载页「开始下载」实际渲染高度必须是 35（原来 52）。
+            Layout(download, 900, 466);
+            Assert.Equal(35, Find<Button>(download, "BtnStart").ActualHeight);
 
             var search = new SearchPage();
             var searchRoot = Assert.IsType<Grid>(search.Content);
@@ -817,14 +834,21 @@ public class UiSmokeTests
             // 模拟 900×550 默认窗口的内容区：550 - 10×2（透明外边）- 8×2（内层窗体）
             // - 48（标题栏）= 466（MainWindow.xaml:17 / 123 / 134）。
             Layout(search, 900, 466);
-            Assert.Equal(52, Find<Button>(search, "BtnSearch").ActualHeight);
+            var searchButton = Find<Button>(search, "BtnSearch");
+            Assert.Equal(35, searchButton.ActualHeight);
             Assert.True(
-                searchCard.ActualHeight < 100,
-                $"搜索卡实测高 {searchCard.ActualHeight:0.#}；期望 < 100（紧凑化前约 131）。");
+                searchButton.ActualWidth >= 120,
+                $"「搜索」按钮实测宽 {searchButton.ActualWidth:0.#}；期望 ≥ 120（保留原宽度，只统一高度/字号）。");
             Assert.True(
-                Find<ListBox>(search, "ResultList").ActualHeight > 250,
-                $"结果列表可视高度实测 {Find<ListBox>(search, "ResultList").ActualHeight:0.#}；" +
-                "期望 > 250（结果行约 127 高，需完整容纳 2 行）。");
+                searchCard.ActualHeight < 84,
+                $"搜索卡实测高 {searchCard.ActualHeight:0.#}；期望 < 84（按钮 52→35 后应再矮约 17）。");
+            // 按钮 52→35 后，搜索卡少 17，结果区可视高度由 257.3 增至约 274.3；
+            // 断言下限仍用改前实测值，保证“只增不减”，但不再要求某个精确值。
+            var resultViewportHeight = Find<ListBox>(search, "ResultList").ActualHeight;
+            Assert.True(
+                resultViewportHeight >= 257.3,
+                $"结果列表可视高度实测 {resultViewportHeight:0.#}；" +
+                "期望 ≥ 257.3（改前实测值，按钮变矮后只会更大，仍需完整容纳 2 行）。");
 
             var detail = new DetailWindow("123456");
             try
@@ -837,7 +861,7 @@ public class UiSmokeTests
                     Find<Button>(detail, "BtnDownload").Style);
 
                 Layout((FrameworkElement)detail.Content);
-                Assert.Equal(52, Find<Button>(detail, "BtnDownload").ActualHeight);
+                Assert.Equal(35, Find<Button>(detail, "BtnDownload").ActualHeight);
             }
             finally
             {
