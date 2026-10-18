@@ -10,8 +10,14 @@
 
     health_check() -> dict                         运行时与依赖自检（xUnit 读 dict，保持）
     version() -> str                               后端代码版本
-    bootstrap(plugins_dir: str) -> str             宿主引导（幂等），返回 JSON
-    list_plugins(plugins_dir: str) -> str          只扫描不加载，返回 JSON
+    bootstrap(plugins_dir: str, disabled_json: str = "") -> str
+                                                   宿主引导（幂等），返回 JSON
+    list_plugins(plugins_dir: str, disabled_json: str = "") -> str
+                                                   只扫描不加载，返回 JSON
+    set_plugin_enabled(plugin_id: str, enabled: bool) -> str
+                                                   插件启用/停用（写 disabled.json），返回 JSON
+    get_plugin_management_state(plugins_dir: str) -> str
+                                                   插件管理状态（含 dependents），返回 JSON
     plugin_page_load(plugin_id: str, page_id: str, params_json: str) -> str
                                                    结构化页面协议：载入页面，返回 JSON
     plugin_page_action(plugin_id: str, page_id: str, action_id: str,
@@ -94,6 +100,8 @@ _BOOTSTRAP_LOCK = threading.Lock()
 #:   bootstrapped   —— 是否已执行过 bootstrap（幂等标记）
 #:   result         —— 上一次 bootstrap 的返回值（dict，重复调用原样返回）
 #:   plugins_dir    —— 上一次 bootstrap 使用的插件目录
+#:   disabled_ids   —— 上一次 bootstrap 使用的禁用列表（变化时重算状态）
+#:   load_report    —— 上一次真实装配结果（禁用列表变化时基于它重算状态）
 #:   event_callback —— C# 传进来的委托（强引用，防止被 GC）
 #:   event_sink     —— 注册到事件总线的 sink（闭包，强引用）
 #: 搜索会话不放在这里：统一由 ``jml.core.searcher.get_shared_session()``
@@ -102,6 +110,8 @@ _STATE: dict = {
     "bootstrapped": False,
     "result": None,
     "plugins_dir": None,
+    "disabled_ids": [],
+    "load_report": None,
     "event_callback": None,
     "event_sink": None,
 }
@@ -198,41 +208,79 @@ def _host_failure(exc: BaseException) -> dict:
     return {
         "ok": False,
         "loaded": [],
-        "failed": [{"id": "(host)", "reason": info.error_message}],
+        "failed": [
+            {
+                "id": "(host)",
+                "reason": info.error_message,
+                "enabled": True,
+                "blocked_reason": info.error_message,
+            }
+        ],
         "services": {},
         "error_code": info.error_code,
         "error_message": info.error_message,
     }
 
 
-def bootstrap(plugins_dir: str) -> str:
+def bootstrap(plugins_dir: str, disabled_json: str = "") -> str:
     """宿主引导：注册主程序服务 + 装配插件目录，返回 JSON 字符串。
+
+    参数:
+        plugins_dir: 插件目录；
+        disabled_json: 禁用列表（JSON 数组字符串，可为空）。**空串表示沿用
+            磁盘上的 %APPDATA%/JML/plugins/disabled.json（唯一真源）**；
+            非空表示本次调用显式指定的禁用集合（不落盘，供首启迁移使用）。
 
     返回结构::
 
         {
           "ok": bool,
           "loaded":  [ {"id", "name", "version", "description", "pages": [...],
-                        "development_sample": bool} ],
-          "failed":  [ {"id", "reason"} ],
+                        "development_sample": bool,
+                        "enabled": true, "blocked_reason": ""} ],
+          "failed":  [ {"id", "reason", "enabled": bool, "blocked_reason": str} ],
           "services": {"archive_reader": 1, "jm.search": 1, ...}
         }
 
     幂等：成功装配后第二次调用直接返回上次结果；**失败结果不缓存**，
     下一次调用会重试（便于用户修好插件目录后再点重试）。
+    禁用列表变化时不重新 import/setup（决策 #7：重启生效），只重算本次
+    返回里的状态（停用项移入 failed，依赖方标记"缺少依赖插件"）。
     锁纪律：``_STATE_LOCK`` 只做缓存判断与提交，读盘/import/setup 在锁外，
     不阻塞 UI 线程的 ``set_event_sink``。
     """
     try:
+        from jml.host import plugin_state
+
+        disabled = plugin_state.resolve_disabled_ids(disabled_json)
         with _STATE_LOCK:
             if _STATE["bootstrapped"]:
-                return _dumps(_STATE["result"])
+                if sorted(disabled) == list(_STATE["disabled_ids"]):
+                    return _dumps(_STATE["result"])
 
         with _BOOTSTRAP_LOCK:
             # 双检：排队期间别的调用可能已经装配成功
             with _STATE_LOCK:
-                if _STATE["bootstrapped"]:
+                if (
+                    _STATE["bootstrapped"]
+                    and sorted(disabled) == list(_STATE["disabled_ids"])
+                ):
                     return _dumps(_STATE["result"])
+                cached = _STATE["result"] if _STATE["bootstrapped"] else None
+                raw_report = (
+                    _STATE["load_report"] if _STATE["bootstrapped"] else None
+                )
+
+            if cached is not None:
+                # 只重算状态，不热加载（决策 #7）；基于"真实装配结果"重算，
+                # 保证停用→再启用时能回到真实状态而不是丢失已加载信息。
+                updated = plugin_state.refresh_bootstrap_result(
+                    raw_report or cached, plugins_dir, disabled
+                )
+                with _STATE_LOCK:
+                    _STATE["result"] = updated
+                    _STATE["disabled_ids"] = sorted(disabled)
+                return _dumps(updated)
 
             from jml.host import loader
             from jml.services.host_services import register_host_services
@@ -240,9 +288,9 @@ def bootstrap(plugins_dir: str) -> str:
             # 1. 主程序服务注册（jm.search / jm.detail / jm.download / jm.account）
             register_host_services()
 
-            # 2. 装配插件（discover → topo → import + setup），锁外执行
+            # 2. 装配插件（discover → 排除停用 → topo → import + setup），锁外执行
             try:
-                report = loader.load_all(plugins_dir)
+                report = loader.load_all(plugins_dir, disabled)
             except Exception as exc:
                 # 整体流程级失败（如 plugins_dir 不存在 / 依赖环）
                 return _dumps(_host_failure(exc))
@@ -257,13 +305,20 @@ def bootstrap(plugins_dir: str) -> str:
                 _STATE["bootstrapped"] = True
                 _STATE["result"] = result
                 _STATE["plugins_dir"] = plugins_dir
+                _STATE["disabled_ids"] = sorted(disabled)
+                _STATE["load_report"] = report
             return _dumps(result)
     except Exception as exc:  # 注册表等意外异常同样收口
         return _dumps(_host_failure(exc))
 
 
-def list_plugins(plugins_dir: str) -> str:
+def list_plugins(plugins_dir: str, disabled_json: str = "") -> str:
     """只扫描 + 校验 manifest，不导入不装配，返回 JSON 字符串。
+
+    与 bootstrap 同构（loaded/failed/services），并给每个插件带上
+    ``enabled`` 与 ``blocked_reason``；被停用插件进入 failed（enabled=false），
+    依赖它们的插件以"缺少依赖插件 xxx"明确失败。
+    ``disabled_json`` 语义同 :func:`bootstrap`（空串沿用磁盘真源）。
 
     供插件管理界面的"重新扫描"使用；失败时仍返回同构结构并附
     ``error_code`` / ``error_message``。
@@ -272,26 +327,23 @@ def list_plugins(plugins_dir: str) -> str:
     JSON，而不是把 ImportError 漏给 C#（契约 §1 入口不抛异常）。
     """
     try:
-        from jml.host import loader
+        from jml.host import loader, plugin_state
         from jml.host.registry import REGISTRY
 
+        disabled = plugin_state.resolve_disabled_ids(disabled_json)
         manifests = loader.discover(plugins_dir)
-        loaded = [
-            {
-                "id": manifest["id"],
-                "name": manifest["name"],
-                "version": manifest["version"],
-                "description": manifest["description"],
-                "pages": list(manifest["pages"]),
-                "development_sample": manifest["development_sample"],
-            }
-            for manifest in manifests
-        ]
+        loaded, failed = plugin_state.scan_report(manifests, disabled)
         # discover 阶段的坏 manifest → failed（loader 只读快照，不摸私有状态）
-        failed = []
         for err in loader.recent_errors():
             dir_name, _, reason = err.partition(": ")
-            failed.append({"id": dir_name, "reason": reason})
+            failed.append(
+                {
+                    "id": dir_name,
+                    "reason": reason,
+                    "enabled": True,
+                    "blocked_reason": reason,
+                }
+            )
         return _dumps(
             {
                 "ok": True,
@@ -302,6 +354,95 @@ def list_plugins(plugins_dir: str) -> str:
         )
     except Exception as exc:
         return _dumps(_host_failure(exc))
+
+
+# ---------------------------------------------------------------------------
+# 插件启用/停用入口（阶段 4-5；disabled.json 是唯一真源）
+# ---------------------------------------------------------------------------
+
+
+def set_plugin_enabled(plugin_id: str, enabled: bool) -> str:
+    """启用/停用插件：写入 ``%APPDATA%/JML/plugins/disabled.json``。
+
+    语义（决策 #7）：
+    - 只更新持久化状态与后续 bootstrap / list_plugins 的结果；
+    - **不热加载/不卸载**当前进程里已 import 的插件，重启后真正生效；
+    - 写入是原子的（临时文件 + os.replace），失败返回 ``IO_ERROR``。
+
+    返回::
+
+        {"ok": true, "plugin_id": str, "enabled": bool,
+         "status": "enabled" | "disabled"}
+
+    失败：
+    - 空 id → ``INVALID_ARGUMENT``；
+    - 不在最近一次扫描结果里的 id → ``NOT_FOUND``；
+    - 写盘失败 → ``IO_ERROR``。
+    """
+    try:
+        from jml.host import loader, plugin_state
+
+        pid = str(plugin_id or "").strip()
+        if not pid:
+            return _dumps(make_error(ERROR_INVALID_ARGUMENT, "插件 id 不能为空"))
+        if pid not in loader.known_plugin_ids():
+            return _dumps(make_error(ERROR_NOT_FOUND, f"插件不存在: {pid}"))
+
+        disabled = set(plugin_state.load_disabled_ids())
+        if enabled:
+            disabled.discard(pid)
+        else:
+            disabled.add(pid)
+        try:
+            current = plugin_state.save_disabled_ids(disabled)
+        except OSError as exc:
+            return _dumps(make_error(ERROR_IO, f"插件停用状态写入失败: {exc}"))
+
+        is_enabled = pid not in current
+        return _dumps(
+            {
+                "ok": True,
+                "plugin_id": pid,
+                "enabled": is_enabled,
+                "status": "enabled" if is_enabled else "disabled",
+            }
+        )
+    except Exception as exc:
+        return _failure(exc)
+
+
+def get_plugin_management_state(plugins_dir: str) -> str:
+    """返回插件管理界面所需的完整状态（每个插件一行）。
+
+    成功::
+
+        {"ok": true, "plugins": [
+            {"id", "name", "version", "description",
+             "enabled": bool,
+             "status": "loaded" | "disabled" | "failed",
+             "reason": str,               # 空串表示正常
+             "dependents": [plugin_id, ...]}   # 直接或间接依赖它的插件
+        ]}
+
+    只扫描 manifest，不 import 插件；``status`` 依据最近一次 bootstrap
+    的装配结果 + 当前 disabled.json 推导。坏 manifest 目录也会作为
+    failed 行出现，避免界面凭空少一行。
+    """
+    try:
+        from jml.host import plugin_state
+
+        plugins = plugin_state.management_state(plugins_dir)
+        return _dumps({"ok": True, "plugins": plugins})
+    except Exception as exc:
+        info = classify(exc)
+        return _dumps(
+            {
+                "ok": False,
+                "plugins": [],
+                "error_code": info.error_code,
+                "error_message": info.error_message,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +993,8 @@ def reset_host_state() -> None:
         _STATE["bootstrapped"] = False
         _STATE["result"] = None
         _STATE["plugins_dir"] = None
+        _STATE["disabled_ids"] = []
+        _STATE["load_report"] = None
         _STATE["event_callback"] = None
         _STATE["event_sink"] = None
 

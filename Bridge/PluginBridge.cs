@@ -45,19 +45,35 @@ public static class PluginBridge
     /// <summary>
     /// 启动插件宿主：注册主程序服务 + 扫描并加载插件。
     /// 可重复调用（Python 侧幂等，二次调用返回上次结果）。
+    /// <paramref name="disabledIdsJson"/> 为空标识沿用 Python 磁盘上的
+    /// disabled.json（唯一真源）；阶段 4-5 起由 <see cref="PluginManageBridge"/> 负责。
     /// </summary>
-    public static BootstrapResultDto Bootstrap(string pluginsDir)
+    public static BootstrapResultDto Bootstrap(
+        string pluginsDir,
+        string disabledIdsJson = "")
     {
-        return PythonGateway.CallJson<BootstrapResultDto>(
-            backend => (string)backend.bootstrap(pluginsDir));
+        return PluginManageBridge.Bootstrap(pluginsDir, disabledIdsJson);
     }
 
     /// <summary>
     /// 只扫描校验、不加载插件（供插件管理界面的“重新扫描”使用）。
     /// </summary>
-    public static BootstrapResultDto ListPlugins(string pluginsDir)
+    public static BootstrapResultDto ListPlugins(
+        string pluginsDir,
+        string disabledIdsJson = "")
     {
-        return PythonGateway.CallJson<BootstrapResultDto>(
-            backend => (string)backend.list_plugins(pluginsDir));
+        return PluginManageBridge.ListPlugins(pluginsDir, disabledIdsJson);
+    }
+
+    /// <summary>启用/停用插件（委托给阶段 4-5 的插件管理桥）。</summary>
+    public static SetPluginEnabledResultDto SetPluginEnabled(string pluginId, bool enabled)
+    {
+        return PluginManageBridge.SetPluginEnabled(pluginId, enabled);
+    }
+
+    /// <summary>读取插件管理状态（含 dependents）。</summary>
+    public static PluginManagementStateDto GetManagementState(string pluginsDir)
+    {
+        return PluginManageBridge.GetManagementState(pluginsDir);
     }
 }

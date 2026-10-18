@@ -10,7 +10,13 @@ namespace JML.Infrastructure;
 /// </summary>
 public sealed class AppSettings
 {
-    /// <summary>禁用的插件 id 列表</summary>
+    /// <summary>
+    /// 【已迁移，仅首启兼容读取】旧版禁用的插件 id 列表。
+    /// 阶段 4-5 起唯一真源是 Python 侧 <c>%APPDATA%/JML/plugins/disabled.json</c>：
+    /// <c>PluginManageBridge</c> 首次进入插件管理时把这里的非空值迁移过去并清空，
+    /// 之后本字段保持为空，不再作为任何启用/停用判断依据。
+    /// 保留属性是为了让迁移代码与旧设置文件仍可读取（不再新增写入来源）。
+    /// </summary>
     public List<string> DisabledPlugins { get; set; } = [];
 
     /// <summary>上次选择的下载目录（阶段 3 接入；只存路径，绝不存凭据）</summary>

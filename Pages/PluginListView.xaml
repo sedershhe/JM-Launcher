@@ -21,23 +21,26 @@
                   AutoGenerateColumns="False"
                   IsReadOnly="True"
                   CanUserAddRows="False"
-                  CanUserDeleteRows="False">
+                  CanUserDeleteRows="False"
+                  SelectionChanged="GridPlugins_SelectionChanged">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="2*" />
                 <DataGridTextColumn Header="版本" Binding="{Binding Version}" Width="80" />
-                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="110" />
+                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="220" />
                 <DataGridTextColumn Header="说明" Binding="{Binding Description}" Width="3*" />
             </DataGrid.Columns>
         </DataGrid>
 
-        <!-- 操作按钮（启用/停用先占位禁用：阶段 3 依赖配置文件服务） -->
+        <!-- 操作按钮：启用/停用经 Python 插件管理入口（阶段 4-5），选中行后才可用。 -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,12,0,0">
             <Button x:Name="BtnEnable" Content="启用" IsEnabled="False"
                     Style="{StaticResource SecondaryButton}"
-                    ToolTip="阶段 3 实现（依赖配置文件服务）" />
+                    Click="BtnEnable_Click"
+                    ToolTip="启用选中插件（重启后加载）" />
             <Button x:Name="BtnDisable" Content="停用" Margin="8,0,0,0" IsEnabled="False"
                     Style="{StaticResource SecondaryButton}"
-                    ToolTip="阶段 3 实现（依赖配置文件服务）" />
+                    Click="BtnDisable_Click"
+                    ToolTip="停用选中插件（重启后生效；依赖它的插件会被拒绝加载）" />
             <Button x:Name="BtnRescan" Content="重新扫描" Margin="8,0,0,0"
                     Style="{StaticResource SecondaryButton}"
                     Click="BtnRescan_Click" />

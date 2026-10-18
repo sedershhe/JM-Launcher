@@ -31,6 +31,17 @@ public record PluginInfoDto
     /// <summary>插件声明的页面列表</summary>
     [JsonPropertyName("pages")]
     public List<PluginPageDto> Pages { get; init; } = [];
+
+    /// <summary>
+    /// 是否处于启用状态（阶段 4-5：由 Python 侧 disabled.json 判定）。
+    /// 默认 true，兼容旧 Python 返回值缺字段的情况。
+    /// </summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>加载被阻断的原因（空串 = 正常）。</summary>
+    [JsonPropertyName("blocked_reason")]
+    public string BlockedReason { get; init; } = "";
 }
 
 /// <summary>插件页面声明。</summary>
@@ -53,9 +64,17 @@ public record LoadErrorDto
     [JsonPropertyName("id")]
     public string Id { get; init; } = "";
 
-    /// <summary>中文失败原因（协议不符 / 缺依赖 / 缺服务等）</summary>
+    /// <summary>中文失败原因（协议不符 / 缺依赖 / 缺服务 / 已停用等）</summary>
     [JsonPropertyName("reason")]
     public string Reason { get; init; } = "";
+
+    /// <summary>false 表示该插件被停用（区别于真正的加载失败）。</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>加载被阻断的原因（空串 = 正常）。</summary>
+    [JsonPropertyName("blocked_reason")]
+    public string BlockedReason { get; init; } = "";
 }
 
 /// <summary>bootstrap / list_plugins 的整体返回。</summary>

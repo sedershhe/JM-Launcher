@@ -165,7 +165,7 @@ def test_set_event_sink_not_blocked_by_bootstrap(monkeypatch, tmp_path):
     entered = threading.Event()
     release = threading.Event()
 
-    def slow_load_all(plugins_dir):
+    def slow_load_all(plugins_dir, disabled_ids=None):
         entered.set()
         release.wait(5)
         return {"loaded": [], "failed": [], "services": {}}

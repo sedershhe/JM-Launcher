@@ -6,13 +6,18 @@
     topo_sort(manifests)    按 dependencies.plugins 拓扑排序；环检测
                             （CircularDependencyError，消息列出环成员）；
                             缺依赖（DependencyError，消息含双方）
-    load_all(plugins_dir)   discover → topo → 依序装配：
+    load_all(plugins_dir, disabled_ids=None)
+                            discover → topo → 依序装配：
+                            0. disabled_ids 里的插件**不 import、不 setup**，
+                               记 failed（原因"插件已停用"）
                             1. 核对该插件 services.requires（缺 → 不加载，
                                记错误"插件 xxx 缺少服务 yyy/版本 n"）
-                            2. 把插件目录加入 sys.path（宿主统一做的
+                            2. 依赖了被停用/未装载插件的插件明确拒绝加载，
+                               原因"缺少依赖插件 xxx（...）"（计划书 8.2/10.4）
+                            3. 把插件目录加入 sys.path（宿主统一做的
                                **唯一**路径操作；插件自身禁止任何路径探测）
-                            3. importlib 导入 entry 模块
-                            4. 调用其 setup(ctx)
+                            4. importlib 导入 entry 模块
+                            5. 调用其 setup(ctx)
     容错纪律: 先加载的不受后面失败影响；单个插件 setup 抛异常 → 该插件
     标记加载失败并记录错误消息，不影响其它插件。
 """
@@ -34,6 +39,7 @@ from jml import events
 from jml.host import pages
 from jml.host.manifest import load_manifest
 from jml.host.plugin_context import PluginContext
+from jml.host.plugin_state import DISABLED_REASON
 from jml.host.registry import REGISTRY
 
 
@@ -62,17 +68,29 @@ def discover(plugins_dir: str) -> list[dict]:
             except PluginError as exc:
                 # 坏 manifest 记错误继续扫下一个（不中断整体）
                 _LOAD_ERRORS.append(f"{entry_name}: {exc}")
+    with _KNOWN_LOCK:
+        _KNOWN_MANIFESTS.clear()
+        for manifest in manifests:
+            _KNOWN_MANIFESTS[manifest["id"]] = manifest
     return manifests
 
 
-def topo_sort(manifests: list[dict]) -> list[dict]:
+def topo_sort(manifests: list[dict], skipped_ids=None) -> list[dict]:
     """按 dependencies.plugins 拓扑排序，被依赖者在前。
 
+    参数:
+        skipped_ids: 已知"被停用/被排除"的插件 id 集合。依赖这些 id 时
+            不抛 DependencyError（由调用方在装配阶段给出"插件已停用"的
+            明确原因）；依赖**完全不存在**的 id 仍然抛错。
+
     异常:
-        DependencyError         —— 依赖的插件不在 manifests 里（消息含
-                                    缺失插件名与需要它的插件名）
+        DependencyError         —— 依赖的插件既不在 manifests 里也不在
+                                    skipped_ids 里（消息含双方）
         CircularDependencyError —— 依赖环（消息列出环成员）
     """
+    skipped = {
+        item for item in (skipped_ids or []) if isinstance(item, str) and item
+    }
     by_id = {m["id"]: m for m in manifests}
 
     # 依赖图: dep_id -> [依赖它的插件 id]（正向邻接表）
@@ -82,6 +100,9 @@ def topo_sort(manifests: list[dict]) -> list[dict]:
     for mid, manifest in by_id.items():
         for dep in manifest["dependencies"]["plugins"]:
             if dep not in by_id:
+                if dep in skipped:
+                    # 依赖被停用：装配阶段由 load_all 明确拒绝依赖方
+                    continue
                 raise DependencyError(
                     f"插件 {mid} 缺少依赖插件 {dep}（已声明但未安装或被停用）"
                 )
@@ -109,18 +130,41 @@ def topo_sort(manifests: list[dict]) -> list[dict]:
     return ordered
 
 
-def load_all(plugins_dir: str) -> dict:
-    """完整装配流程：discover → topo → 依序导入并 setup。
+def load_all(plugins_dir: str, disabled_ids=None) -> dict:
+    """完整装配流程：discover → 排除停用 → topo → 依序导入并 setup。
+
+    参数:
+        disabled_ids: 被停用插件 id 集合。这些插件**不 import、不 setup**，
+            结果里进入 failed 且 ``reason`` / ``blocked_reason`` 为
+            "插件已停用"、``enabled`` 为 false；依赖它们的插件同样被拒绝
+            加载，原因"缺少依赖插件 xxx（该插件已停用）"。
 
     返回:
         {
-          "loaded":  [ {id, name, version, description, pages, development_sample} ],
-          "failed":  [ {id, reason} ],        # 含 discover 阶段的坏目录
+          "loaded":  [ {id, name, version, description, pages,
+                        development_sample, enabled, blocked_reason} ],
+          "failed":  [ {id, reason, enabled, blocked_reason} ],
           "services": {name: version},        # 装配后注册表快照
         }
+        停用项不新增顶层列表（沿用 failed，C# 按 enabled 区分状态）。
     """
+    global _LAST_REPORT
+
+    with _REPORT_LOCK:
+        # 装配开始即作废旧报告：中途抛错（如依赖环）时管理界面不会读到过期状态
+        _LAST_REPORT = None
+
+    disabled = {
+        item.strip()
+        for item in (disabled_ids or [])
+        if isinstance(item, str) and item.strip()
+    }
     manifests = discover(plugins_dir)
-    ordered = topo_sort(manifests)
+    # 被停用插件不参与拓扑（但作为"已知缺失依赖"传给 topo，避免整批失败）
+    enabled_manifests = [
+        manifest for manifest in manifests if manifest["id"] not in disabled
+    ]
+    ordered = topo_sort(enabled_manifests, skipped_ids=disabled)
 
     # 重新装配语义：上一次的已加载快照与配置实例都作废（配置随后按新 manifest 重建）
     with _LOADED_LOCK:
@@ -132,28 +176,67 @@ def load_all(plugins_dir: str) -> dict:
 
     loaded: list[dict] = []
     failed: list[dict] = []
+    failed_ids: set[str] = set()
 
     # discover 阶段的坏 manifest 先记入 failed（格式: "目录名: 消息"）
     with _LOAD_ERRORS_LOCK:
         for err in _LOAD_ERRORS:
             dir_name, _, reason = err.partition(": ")
-            failed.append({"id": dir_name, "reason": reason})
+            failed.append(
+                {
+                    "id": dir_name,
+                    "reason": reason,
+                    "enabled": True,
+                    "blocked_reason": reason,
+                }
+            )
+            failed_ids.add(dir_name)
 
     for manifest in ordered:
         plugin_id = manifest["id"]
+
+        # 依赖被停用 / 依赖方已失败 → 明确拒绝，而不是让 setup 崩
+        blocked_reason = _dependency_block_reason(manifest, disabled, failed_ids)
+        if blocked_reason:
+            failed.append(
+                {
+                    "id": plugin_id,
+                    "reason": blocked_reason,
+                    "enabled": True,
+                    "blocked_reason": blocked_reason,
+                }
+            )
+            failed_ids.add(plugin_id)
+            continue
+
         try:
             _load_single(manifest)
         except PluginError as exc:
             # 插件体系错误：记录后继续装下一个（先加载的不受后面失败影响）
             # setup 中途注册过的页面钩子一并撤销，不留半装状态
             pages.PAGE_REGISTRY.clear_plugin(plugin_id)
-            failed.append({"id": plugin_id, "reason": str(exc)})
+            failed.append(
+                {
+                    "id": plugin_id,
+                    "reason": str(exc),
+                    "enabled": True,
+                    "blocked_reason": str(exc),
+                }
+            )
+            failed_ids.add(plugin_id)
             continue
         except Exception as exc:  # setup 内任意异常：同样只标记该插件失败
             pages.PAGE_REGISTRY.clear_plugin(plugin_id)
+            reason = f"setup 执行失败: {type(exc).__name__}: {exc}"
             failed.append(
-                {"id": plugin_id, "reason": f"setup 执行失败: {type(exc).__name__}: {exc}"}
+                {
+                    "id": plugin_id,
+                    "reason": reason,
+                    "enabled": True,
+                    "blocked_reason": reason,
+                }
             )
+            failed_ids.add(plugin_id)
             continue
         loaded.append(
             {
@@ -163,17 +246,54 @@ def load_all(plugins_dir: str) -> dict:
                 "description": manifest["description"],
                 "pages": list(manifest["pages"]),
                 "development_sample": manifest["development_sample"],
+                "enabled": True,
+                "blocked_reason": "",
             }
         )
         # 设置界面按"已加载插件"枚举设置定义（失败插件不进快照）
         with _LOADED_LOCK:
             _LOADED_MANIFESTS[plugin_id] = manifest
 
+    # 被停用插件：既不 import 也不 setup，明确记入 failed
+    for manifest in sorted(
+        (item for item in manifests if item["id"] in disabled),
+        key=lambda item: item["id"],
+    ):
+        failed.append(
+            {
+                "id": manifest["id"],
+                "reason": DISABLED_REASON,
+                "enabled": False,
+                "blocked_reason": DISABLED_REASON,
+            }
+        )
+
+    # 记录本次装配结果：管理界面 / bootstrap 状态重算只需要状态，不重装插件
+    with _REPORT_LOCK:
+        _LAST_REPORT = {
+            "dir": os.fspath(plugins_dir),
+            "loaded": [dict(item) for item in loaded],
+            "failed": [dict(item) for item in failed],
+            "disabled": sorted(disabled),
+        }
+
     return {
         "loaded": loaded,
         "failed": failed,
         "services": REGISTRY.names(),
     }
+
+
+def _dependency_block_reason(
+    manifest: dict, disabled: set[str], failed_ids: set[str]
+) -> str:
+    """依赖了被停用/未成功装载的插件 → 返回拒绝原因；否则空串。"""
+    for dep in manifest["dependencies"]["plugins"]:
+        if dep in disabled:
+            return f"缺少依赖插件 {dep}（该插件已停用）"
+        if dep in failed_ids:
+            return f"缺少依赖插件 {dep}（该插件未能加载）"
+    return ""
 
 
 def _load_single(manifest: dict) -> None:
@@ -352,6 +472,16 @@ _CONFIG_STORES_LOCK = threading.RLock()
 _LOADED_MANIFESTS: dict[str, dict] = {}
 _LOADED_LOCK = threading.RLock()
 
+#: 上一次 discover 扫到的 manifest: {plugin_id: manifest}
+#: 供"不带 plugins_dir 的 set_plugin_enabled"校验 id 是否存在，
+#: 以及管理界面在"未重新扫描"时复用。
+_KNOWN_MANIFESTS: dict[str, dict] = {}
+_KNOWN_LOCK = threading.RLock()
+
+#: 上一次 load_all 的装配结果快照（供 bootstrap 状态重算 / 管理界面读原因）
+_LAST_REPORT: dict | None = None
+_REPORT_LOCK = threading.RLock()
+
 
 def loaded_plugins() -> list[dict]:
     """已加载插件的 manifest 快照（按 id 排序，浅拷贝）。
@@ -361,6 +491,29 @@ def loaded_plugins() -> list[dict]:
     """
     with _LOADED_LOCK:
         return [dict(_LOADED_MANIFESTS[pid]) for pid in sorted(_LOADED_MANIFESTS)]
+
+
+def known_plugin_ids() -> list[str]:
+    """最近一次 discover 扫描到的插件 id（排序副本；坏目录不算）。
+
+    ``set_plugin_enabled`` 用它区分"非法 id（NOT_FOUND）"与"合法 id"，
+    不依赖是否已经装配成功（加载失败的插件也允许停用）。
+    """
+    with _KNOWN_LOCK:
+        return sorted(_KNOWN_MANIFESTS)
+
+
+def last_load_report() -> dict | None:
+    """最近一次 load_all 的结果快照（只读副本）；尚未装配过返回 None。"""
+    with _REPORT_LOCK:
+        if _LAST_REPORT is None:
+            return None
+        return {
+            "dir": _LAST_REPORT.get("dir", ""),
+            "loaded": [dict(item) for item in _LAST_REPORT.get("loaded", [])],
+            "failed": [dict(item) for item in _LAST_REPORT.get("failed", [])],
+            "disabled": list(_LAST_REPORT.get("disabled", [])),
+        }
 
 
 def config_for(plugin_id: str):
@@ -395,5 +548,10 @@ def reset() -> None:
         _CONFIG_STORES.clear()
     with _LOADED_LOCK:
         _LOADED_MANIFESTS.clear()
+    with _KNOWN_LOCK:
+        _KNOWN_MANIFESTS.clear()
+    with _REPORT_LOCK:
+        global _LAST_REPORT
+        _LAST_REPORT = None
     # 页面钩子注册表随装配状态一起清空（插件重新装配后由插件重新注册）
     pages.reset()

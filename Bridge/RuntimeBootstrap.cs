@@ -60,6 +60,17 @@ public static class RuntimeBootstrap
                 relay = new EventRelay(uiDispatcher);
                 relay.Start();
 
+                // 阶段 4-5：旧 AppSettings.DisabledPlugins → Python disabled.json
+                // 的一次性迁移。没有旧数据时零开销；失败只记日志，不阻断启动。
+                try
+                {
+                    PluginManageBridge.MigrateLegacyDisabledPluginsAtStartup();
+                }
+                catch (Exception ex)
+                {
+                    BridgeFailures.Log("启动期迁移插件禁用列表", ex);
+                }
+
                 _events = relay;
                 LastFailureMessage = null;
                 LogSanitizer.Log($"Python 后端启动完成，日志目录：{AppPaths.LogDirectory}");
