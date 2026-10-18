@@ -5,6 +5,9 @@
 - 切换收藏夹目录、切换排序（最近收藏 ``mr`` / 最多点击 ``mv`` / 最多图片 ``mp``）；
 - 每条可「详情」「下载」——插件只返回 ``intent``，由 C# 转发给主窗口的
   现有 ``DetailWindow`` / 下载页路径（C# 不做业务判断）。
+- 列表行带 ``thumb_book_id``（C# 据此异步取封面），页级带
+  ``row_double_click_action="detail"``（双击行等价于点「详情」）；封面字节与
+  取图失败兜底全部在 C#，插件只给编号。
 
 登录态协作（本任务的关键设计，见桥接契约 §六）::
 
@@ -205,6 +208,8 @@ def _row_from_item(item: object) -> dict | None:
     )
     return {
         "book_id": book_id,
+        # 阶段 4-4 协议扩展：行级可选字段，C# 用它去取封面（插件不传图片字节）。
+        "thumb_book_id": book_id,
         "title": title or UNKNOWN_TITLE,
         "author": _author_text(_first_value(data, ("author", "authors")))
         or UNKNOWN_AUTHOR,
@@ -330,6 +335,10 @@ class FavoritesPage:
                 {"id": "detail", "title": "详情", "primary": True},
                 {"id": "download", "title": "下载"},
             ],
+            # 阶段 4-4 协议扩展：页级可选字段。双击行时 C# 以
+            # {row, row_index, page} 调 plugin_page_action，action id 就是这里的值；
+            # 与行按钮走同一套 intent 机制（detail 打开详情窗）。
+            "row_double_click_action": "detail",
             "empty_text": EMPTY_TEXT,
             # 阶段 4-4 协议扩展：list 模板可选 filters（C# 渲染成下拉框，
             # 变更后以 {page: 1, <key>: <value>} 重新 plugin_page_load）。

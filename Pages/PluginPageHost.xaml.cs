@@ -1,13 +1,16 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Media.Media3D;
 using JML.Bridge;
 using JML.Bridge.Dto;
 using JML.Infrastructure;
@@ -47,6 +50,16 @@ public partial class PluginPageHost : UserControl
     private readonly Dictionary<string, string> _listFilterValues = [];
     private readonly Dictionary<string, List<PluginPageFilterOptionDto>> _listFilterOptions = [];
     private bool _rebuildingListFilters;
+
+    // list 模板行双击动作（阶段 4-4 协议扩展：data.row_double_click_action）
+    private string _rowDoubleClickAction = string.Empty;
+
+    // list 模板封面列（阶段 4-4 协议扩展：行内 thumb_book_id）
+    // 只在行容器被虚拟化创建（= 当前可见/已加载）时取图；同一 book_id 全局去重缓存。
+    private DataGridTemplateColumn? _coverColumn;
+    private readonly Dictionary<string, ImageSource> _coverCache = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _coverFailed = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task<byte[]?>> _coverRequests = new(StringComparer.Ordinal);
 
     // browser 模板状态
     private int _filePage = 1;
@@ -94,6 +107,19 @@ public partial class PluginPageHost : UserControl
     /// STA 测试注入假实现断言"只转发、不做业务"。
     /// </summary>
     internal IUiIntentHandler? IntentHandler { get; set; }
+
+    /// <summary>
+    /// 封面取图器（阶段 4-4 协议扩展）：生产默认 <see cref="SearchBridge.FetchCover"/>
+    /// （内部已 <c>Task.Run</c>），STA 测试注入假实现，避免真的调用 Python。
+    /// 只返回原始 bytes；<see cref="BitmapImage"/> 一律回 UI 线程再创建。
+    /// </summary>
+    internal Func<string, Task<byte[]?>>? CoverFetcher { get; set; }
+
+    /// <summary>当前 list 模板是否渲染了封面列（行内带 thumb_book_id 时为 true）。</summary>
+    internal bool HasCoverColumn => _coverColumn is not null;
+
+    /// <summary>当前 list 模板的双击动作 id（空串 = 双击无动作）。</summary>
+    internal string RowDoubleClickAction => _rowDoubleClickAction;
 
     /// <summary>当前 list 模板渲染出的筛选下拉（测试用；顺序与 Python 一致）。</summary>
     internal IReadOnlyList<ComboBox> ListFilterCombos =>
@@ -145,6 +171,10 @@ public partial class PluginPageHost : UserControl
         _gateway = gateway ?? PluginPageGateway.Instance;
 
         InitializeComponent();
+
+        // 行容器被虚拟化创建时才知道“这一行当前可见/已加载”：封面取图在这里触发，
+        // 不随 page.Rows 一次性发请求（大收藏夹不会瞬间打满网络）。
+        GridRows.LoadingRow += OnListRowLoading;
 
         Loaded += async (_, _) =>
         {
@@ -273,6 +303,9 @@ public partial class PluginPageHost : UserControl
         BtnListPrev.IsEnabled = _listPage > 1;
         BtnListNext.IsEnabled = _listPage < _listTotalPages;
 
+        // 双击动作 id 完全来自 Python；空串 = 本页双击不响应（旧插件行为不变）。
+        _rowDoubleClickAction = (page.RowDoubleClickAction ?? string.Empty).Trim();
+
         BuildListColumns(page);
         BuildListFilters(page);
 
@@ -291,6 +324,23 @@ public partial class PluginPageHost : UserControl
     private void BuildListColumns(PluginListPageDto page)
     {
         GridRows.Columns.Clear();
+        _coverColumn = null;
+
+        // 阶段 4-4 协议扩展：只要有一行带 thumb_book_id 就补最左侧封面列
+        // （40×56、圆角 3）。没有该字段的插件列结构完全不变。
+        if (page.Rows.Any(row =>
+                !string.IsNullOrEmpty(PluginPageRowFields.GetThumbBookId(row))))
+        {
+            _coverColumn = new DataGridTemplateColumn
+            {
+                Header = string.Empty,
+                CellTemplate = (DataTemplate)FindResource("PluginRowCoverTemplate"),
+                Width = new DataGridLength(56),
+                CanUserResize = false,
+                IsReadOnly = true,
+            };
+            GridRows.Columns.Add(_coverColumn);
+        }
 
         foreach (PluginPageColumnDto column in page.Columns)
         {
@@ -437,6 +487,135 @@ public partial class PluginPageHost : UserControl
         }
     }
 
+    // ------------------------------------------------------------------
+    // list 模板：封面（阶段 4-4 协议扩展：行内 thumb_book_id）
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// 行容器被虚拟化创建（= 当前可见/已加载）时才按需取封面：不对整页 rows
+    /// 一次性发请求。同一 book_id 全局去重缓存；失败只把该行标成暗红底 X，
+    /// 不影响列表渲染、不弹框。
+    /// </summary>
+    private void OnListRowLoading(object? sender, DataGridRowEventArgs e)
+    {
+        if (e.Row?.DataContext is PluginRowView row)
+        {
+            _ = EnsureRowCoverAsync(row);
+        }
+    }
+
+    /// <summary>
+    /// 取（或复用缓存）某行封面。内部可见：STA 测试直接喂行视图，断言
+    /// “同一 book_id 只取一次 / 失败显示 X”。
+    /// </summary>
+    internal async Task EnsureRowCoverAsync(PluginRowView row)
+    {
+        string bookId = row.ThumbBookId;
+        if (string.IsNullOrEmpty(bookId) || row.CoverSettled)
+        {
+            return;
+        }
+
+        if (_coverCache.TryGetValue(bookId, out ImageSource? cached))
+        {
+            row.SetCover(cached);
+            return;
+        }
+
+        if (_coverFailed.Contains(bookId))
+        {
+            row.SetCoverFailed();
+            return;
+        }
+
+        if (!_coverRequests.TryGetValue(bookId, out Task<byte[]?>? request))
+        {
+            request = RequestCoverBytesAsync(bookId);
+            _coverRequests[bookId] = request;
+        }
+
+        byte[]? bytes;
+        try
+        {
+            bytes = await request;
+        }
+        catch (Exception ex)
+        {
+            // 取图失败不得影响列表渲染、不弹框：只登记失败并显示 X。
+            LogSanitizer.Log($"插件页面封面获取失败：{ex.GetType().Name}: {ex.Message}");
+            bytes = null;
+        }
+
+        // 同一 book_id 的多行共用同一个请求：先完成的那次已写缓存，后续直接复用。
+        if (_coverCache.TryGetValue(bookId, out ImageSource? shared))
+        {
+            row.SetCover(shared);
+            return;
+        }
+
+        if (_coverFailed.Contains(bookId))
+        {
+            row.SetCoverFailed();
+            return;
+        }
+
+        ApplyCoverBytes(row, bookId, bytes);
+    }
+
+    private async Task<byte[]?> RequestCoverBytesAsync(string bookId)
+    {
+        try
+        {
+            return CoverFetcher is { } fetcher
+                ? await fetcher(bookId)
+                : await SearchBridge.FetchCover(bookId);
+        }
+        catch (Exception ex)
+        {
+            LogSanitizer.Log($"插件页面封面获取失败：{ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>UI 线程解码 bytes → BitmapImage（CacheOption=OnLoad）；失败显示 X。</summary>
+    private void ApplyCoverBytes(PluginRowView row, string bookId, byte[]? bytes)
+    {
+        BitmapImage? image = bytes is { Length: > 0 } ? CreateCoverImage(bytes) : null;
+        if (image is null)
+        {
+            _coverFailed.Add(bookId);
+            row.SetCoverFailed();
+            return;
+        }
+
+        _coverCache[bookId] = image;
+        row.SetCover(image);
+    }
+
+    /// <summary>
+    /// 在 UI 线程用字节创建 BitmapImage（旧缺陷 #7）：CacheOption=OnLoad 保证
+    /// 流释放后仍可显示；Freeze 后可安全持有。失败返回 null（不抛）。
+    /// </summary>
+    private static BitmapImage? CreateCoverImage(byte[] bytes)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch (Exception ex)
+        {
+            LogSanitizer.Log($"插件页面封面解码失败：{ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>
     /// 行操作列：每行同一组按钮，点击时把该行原始 JSON 回传给 Python
     /// （C# 不解释行字段，也不做可见性判断）。
@@ -474,15 +653,82 @@ public partial class PluginPageHost : UserControl
         }
 
         string actionId = element.Tag as string ?? string.Empty;
-        PluginRowView? row = element.DataContext as PluginRowView;
-        var payload = new Dictionary<string, object?>
-        {
-            ["row"] = row?.Row,
-            ["row_index"] = row?.Index ?? -1,
-            ["page"] = _listPage,
-        };
+        await RunActionAsync(actionId, BuildRowPayload(element.DataContext as PluginRowView));
+    }
 
-        await RunActionAsync(actionId, payload);
+    // ------------------------------------------------------------------
+    // list 模板：行双击（阶段 4-4 协议扩展：data.row_double_click_action）
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// 双击行：payload 与行按钮完全一致（<c>{row, row_index, page}</c>），action id
+    /// 来自 Python 的 <c>data.row_double_click_action</c>；空串 = 不响应
+    /// （旧插件行为不变）。双击行内按钮 / 表头不算“双击行”，避免重复派发。
+    /// </summary>
+    private async void GridRows_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (string.IsNullOrEmpty(_rowDoubleClickAction))
+        {
+            return;
+        }
+
+        if (HasAncestor<Button>(e.OriginalSource as DependencyObject)
+            || HasAncestor<DataGridColumnHeader>(e.OriginalSource as DependencyObject))
+        {
+            return;
+        }
+
+        if (GridRows.SelectedItem is not PluginRowView row)
+        {
+            return;
+        }
+
+        await RunListRowDoubleClickAsync(row);
+    }
+
+    /// <summary>内部可见：STA 测试直接调用，验证“双击 → action → intent”的完整映射。</summary>
+    internal async Task RunListRowDoubleClickAsync(PluginRowView row)
+    {
+        if (row is null || string.IsNullOrEmpty(_rowDoubleClickAction))
+        {
+            return;
+        }
+
+        await RunActionAsync(_rowDoubleClickAction, BuildRowPayload(row));
+    }
+
+    /// <summary>行动作 / 双击共用的参数：整行原始 JSON + 行下标 + 当前页码。</summary>
+    private Dictionary<string, object?> BuildRowPayload(PluginRowView? row) => new()
+    {
+        ["row"] = row?.Row,
+        ["row_index"] = row?.Index ?? -1,
+        ["page"] = _listPage,
+    };
+
+    /// <summary>沿视觉/逻辑父链找祖先（OriginalSource 可能是 TextBlock / Border 等）。</summary>
+    private static bool HasAncestor<T>(DependencyObject? source) where T : DependencyObject
+    {
+        DependencyObject? current = source;
+        while (current is not null)
+        {
+            if (current is T)
+            {
+                return true;
+            }
+
+            if (current is ContentElement content)
+            {
+                current = ContentOperations.GetParent(content)
+                    ?? (content as FrameworkContentElement)?.Parent;
+                continue;
+            }
+
+            current = current is Visual or Visual3D
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+
+        return false;
     }
 
     private void BtnListPrev_Click(object sender, RoutedEventArgs e)
@@ -1311,13 +1557,21 @@ internal interface IUiIntentHandler
 /// <summary>
 /// 行数据视图：DataGrid 的绑定源。保留插件原始行（<see cref="Row"/>）供动作
 /// 回传，展示时用索引器取值（列 key 由 Python 决定）。
+///
+/// 封面状态（阶段 4-4 协议扩展：行内 <c>thumb_book_id</c>）也挂在这里：
+/// 取图成功显示图片、失败显示暗红底 X、未完成显示灰底占位；任何状态都只
+/// 影响本行，不影响列表渲染。
 /// </summary>
-internal sealed class PluginRowView
+internal sealed class PluginRowView : INotifyPropertyChanged
 {
+    private ImageSource? _cover;
+    private bool _coverFailed;
+
     public PluginRowView(Dictionary<string, JsonElement> row, int index)
     {
         Row = row;
         Index = index;
+        ThumbBookId = PluginPageRowFields.GetThumbBookId(row);
     }
 
     /// <summary>插件原始行（回传给 plugin_page_action 的 row 字段）。</summary>
@@ -1325,6 +1579,70 @@ internal sealed class PluginRowView
 
     /// <summary>行下标（0 起）。</summary>
     public int Index { get; }
+
+    /// <summary>
+    /// 行内可选封面编号（阶段 4-4 协议扩展）；空串 = 本行不显示封面，
+    /// 也不发任何取图请求。
+    /// </summary>
+    public string ThumbBookId { get; }
+
+    /// <summary>已解码的封面（未取到 / 失败时为 null）。</summary>
+    public ImageSource? Cover => _cover;
+
+    /// <summary>灰底占位：尚未开始或正在取图。</summary>
+    public Visibility PlaceholderVisibility =>
+        !CoverSettled ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>暗红底 X：取图或解码失败（与搜索页一致）。</summary>
+    public Visibility FailureVisibility =>
+        _coverFailed ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility CoverVisibility =>
+        _cover is not null ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>封面流程是否已结束（成功或失败）；用于避免重复取图。</summary>
+    public bool CoverSettled => _cover is not null || _coverFailed;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>取图成功：换掉占位，显示图片。</summary>
+    public void SetCover(ImageSource image)
+    {
+        if (ReferenceEquals(_cover, image))
+        {
+            return;
+        }
+
+        _cover = image;
+        _coverFailed = false;
+        Notify(nameof(Cover));
+        Notify(nameof(CoverVisibility));
+        Notify(nameof(PlaceholderVisibility));
+        Notify(nameof(FailureVisibility));
+        Notify(nameof(CoverSettled));
+    }
+
+    /// <summary>取图 / 解码失败：显示暗红底 X（不弹框、不影响其它行）。</summary>
+    public void SetCoverFailed()
+    {
+        if (_cover is null && _coverFailed)
+        {
+            return;
+        }
+
+        _cover = null;
+        _coverFailed = true;
+        Notify(nameof(Cover));
+        Notify(nameof(CoverVisibility));
+        Notify(nameof(PlaceholderVisibility));
+        Notify(nameof(FailureVisibility));
+        Notify(nameof(CoverSettled));
+    }
+
+    private void Notify(string propertyName)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
 
     /// <summary>供 WPF 绑定 <c>[key]</c> 使用；缺字段返回 Undefined（显示空串）。</summary>
     public JsonElement this[string key] =>

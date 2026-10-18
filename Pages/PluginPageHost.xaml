@@ -17,6 +17,35 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              Focusable="True"
              KeyDown="Host_KeyDown">
+    <UserControl.Resources>
+        <!--
+            list 模板的可选封面列（阶段 4-4 协议扩展：行内 thumb_book_id）。
+            C# 只在「至少一行带 thumb_book_id」时插入这一列；封面字节来自
+            SearchBridge.FetchCover，失败显示暗红底 X（与搜索页一致的占位语言）。
+            40×56、圆角 3；绑定的是 PluginRowView 的展示状态，不含业务判断。
+        -->
+        <DataTemplate x:Key="PluginRowCoverTemplate">
+            <Grid Width="40" Height="56" Margin="8,2" VerticalAlignment="Center">
+                <Border Background="{DynamicResource ColorBrushGray7}"
+                        CornerRadius="3"
+                        Visibility="{Binding PlaceholderVisibility}" />
+                <Border Background="{DynamicResource ColorBrushRedBack}"
+                        CornerRadius="3"
+                        Visibility="{Binding FailureVisibility}">
+                    <TextBlock Text="X"
+                               FontSize="18"
+                               FontWeight="Bold"
+                               Foreground="{DynamicResource ColorBrushRedLight}"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center" />
+                </Border>
+                <Image Source="{Binding Cover}"
+                       Stretch="UniformToFill"
+                       Visibility="{Binding CoverVisibility}" />
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -65,7 +94,8 @@
                           CanUserSortColumns="False"
                           CanUserReorderColumns="False"
                           SelectionMode="Single"
-                          HeadersVisibility="Column" />
+                          HeadersVisibility="Column"
+                          MouseDoubleClick="GridRows_MouseDoubleClick" />
 
                 <TextBlock x:Name="TextListEmpty"
                            Grid.Row="1"

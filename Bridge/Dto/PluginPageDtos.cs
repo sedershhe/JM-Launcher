@@ -157,6 +157,14 @@ public record PluginListPageDto
     public List<PluginPageRowActionDto> RowActions { get; init; } = [];
 
     /// <summary>
+    /// 双击行时要调用的 action id（阶段 4-4 协议扩展，可选；缺省空串 = 不响应双击）。
+    /// C# 以 <c>{row, row_index, page}</c> 调 <c>plugin_page_action</c>，与行按钮
+    /// 共用同一套 intent 机制。
+    /// </summary>
+    [JsonPropertyName("row_double_click_action")]
+    public string RowDoubleClickAction { get; init; } = "";
+
+    /// <summary>
     /// 可选筛选下拉（阶段 4-4）：每项渲染成一个下拉框，变更后以
     /// <c>{page: 1, &lt;key&gt;: &lt;value&gt;}</c> 重新 plugin_page_load。
     /// 缺省空列表表示不渲染筛选栏。
@@ -166,6 +174,34 @@ public record PluginListPageDto
 
     [JsonPropertyName("empty_text")]
     public string EmptyText { get; init; } = "";
+}
+
+/// <summary>
+/// list 模板行内可选字段的只读读取（阶段 4-4 协议扩展，契约 §12.2）。
+///
+/// 行数据本身始终以 <see cref="JsonElement"/> 原样保留，这里只做“取出字符串”
+/// 的形状转换，不改写、不删除任何行字段。
+/// </summary>
+public static class PluginPageRowFields
+{
+    /// <summary>行级可选封面编号键：C# 用它调 <c>SearchBridge.FetchCover</c>。</summary>
+    public const string ThumbBookIdKey = "thumb_book_id";
+
+    /// <summary>
+    /// 取行内可选 <c>thumb_book_id</c>；字段缺失 / 非字符串 / 空串 → 空串
+    /// （= 该行不显示封面，也不发任何取图请求）。
+    /// </summary>
+    public static string GetThumbBookId(IReadOnlyDictionary<string, JsonElement>? row)
+    {
+        if (row is null
+            || !row.TryGetValue(ThumbBookIdKey, out JsonElement element)
+            || element.ValueKind != JsonValueKind.String)
+        {
+            return string.Empty;
+        }
+
+        return (element.GetString() ?? string.Empty).Trim();
+    }
 }
 
 /// <summary>browser / action 模板的文件条目。</summary>

@@ -265,6 +265,7 @@ def test_logged_in_rows_columns_and_actions(installed):
     ]
     assert data["rows"][0] == {
         "book_id": "123",
+        "thumb_book_id": "123",
         "title": "标题A",
         "author": "作者甲, 作者乙",
         "page_count": 42,
@@ -274,6 +275,7 @@ def test_logged_in_rows_columns_and_actions(installed):
     # 缺页数 / 点击量 / 更新日期的条目给空值兜底，不发额外请求
     assert data["rows"][1] == {
         "book_id": "456",
+        "thumb_book_id": "456",
         "title": "标题B",
         "author": "作者丙",
         "page_count": 0,
@@ -284,6 +286,8 @@ def test_logged_in_rows_columns_and_actions(installed):
         {"id": "detail", "title": "详情", "primary": True},
         {"id": "download", "title": "下载"},
     ]
+    # 阶段 4-4 协议扩展：双击行 = 调 detail 动作（与行按钮同一套 intent）
+    assert data["row_double_click_action"] == "detail"
     assert data["empty_text"] == "收藏夹是空的"
     assert data["page"] == 1
     assert data["page_size"] == 20
@@ -295,6 +299,42 @@ def test_logged_in_rows_columns_and_actions(installed):
     ]
     # 第一次调用（配置空）用「全部」= 0，目录清单里 0 有效，不重拉
     assert client.calls == [{"page": 1, "order_by": "mr", "folder_id": "0"}]
+
+
+def test_rows_carry_cover_id_and_page_carries_double_click_action(installed):
+    """阶段 4-4 扩展：每行带 thumb_book_id，页级带 row_double_click_action。
+
+    C# 用行级 thumb_book_id 异步取封面（插件不传图片字节），双击行按页级
+    action id 调 plugin_page_action；这两个字段之外的行/列结构不回归。
+    """
+    client = FakeFavoriteClient(page=_sample_page())
+    source = _use_source(client)
+    _login(source)
+
+    data = _load_page_ok()
+
+    # 行级：封面编号就等于本子号
+    assert [row["thumb_book_id"] for row in data["rows"]] == ["123", "456"]
+    # 页级：收藏夹双击 = 「详情」动作
+    assert data["row_double_click_action"] == "detail"
+    # 行字段集合只是多了 thumb_book_id，其余字段保持不变
+    assert set(data["rows"][0]) == {
+        "book_id",
+        "thumb_book_id",
+        "title",
+        "author",
+        "page_count",
+        "click_count",
+        "updated",
+    }
+    # 列定义 / 行动作不被这次扩展改变
+    assert [column["key"] for column in data["columns"]] == [
+        "title",
+        "author",
+        "page_count",
+        "click_count",
+    ]
+    assert [action["id"] for action in data["row_actions"]] == ["detail", "download"]
 
 
 def test_row_with_malformed_item_is_skipped(installed):
@@ -310,6 +350,7 @@ def test_row_with_malformed_item_is_skipped(installed):
     data = _load_page_ok()
 
     assert [row["book_id"] for row in data["rows"]] == ["9"]
+    assert [row["thumb_book_id"] for row in data["rows"]] == ["9"]
 
 
 # ---------------------------------------------------------------------------

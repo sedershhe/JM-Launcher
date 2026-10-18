@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using JML.Bridge;
 using JML.Bridge.Dto;
 using JML.Pages;
@@ -271,6 +273,51 @@ public class PluginPageTests
     }
 
     [Fact]
+    public void LoadResult_ReadsRowDoubleClickActionAndThumbBookId()
+    {
+        const string json = """
+        {
+          "ok": true,
+          "template": "list",
+          "title": "收藏夹",
+          "data": {
+            "columns": [{"key": "title", "title": "标题"}],
+            "rows": [
+              {"book_id": "123", "thumb_book_id": "123", "title": "标题A"},
+              {"book_id": "456", "thumb_book_id": 789, "title": "标题B"},
+              {"book_id": "789", "title": "无封面"}
+            ],
+            "row_double_click_action": "detail",
+            "row_actions": [{"id": "detail", "title": "详情", "primary": true}],
+            "empty_text": "收藏夹是空的"
+          }
+        }
+        """;
+
+        PluginPageLoadResultDto dto = Parse<PluginPageLoadResultDto>(json);
+        PluginListPageDto page =
+            Assert.IsType<PluginListPageDto>(PluginPageData.ToList(dto.Data));
+
+        // 页级双击动作与行操作并列透传
+        Assert.Equal("detail", page.RowDoubleClickAction);
+        Assert.Equal("detail", page.RowActions[0].Id);
+
+        // 行内 thumb_book_id 只在是字符串时生效，且原始行字段一个不少
+        Assert.Equal("123", PluginPageRowFields.GetThumbBookId(page.Rows[0]));
+        Assert.Equal("", PluginPageRowFields.GetThumbBookId(page.Rows[1]));
+        Assert.Equal("", PluginPageRowFields.GetThumbBookId(page.Rows[2]));
+        Assert.Equal("123", page.Rows[0]["thumb_book_id"].GetString());
+        Assert.Equal("标题A", page.Rows[0]["title"].GetString());
+
+        // 缺省字段（旧插件）不报错：动作空串、行内无 thumb_book_id
+        PluginListPageDto legacy = Parse<PluginListPageDto>(
+            """{"columns": [{"key": "time", "title": "时间"}], "rows": [{"time": "x"}]}""");
+        Assert.Equal("", legacy.RowDoubleClickAction);
+        Assert.Equal("", PluginPageRowFields.GetThumbBookId(legacy.Rows[0]));
+        Assert.Equal("", PluginPageRowFields.GetThumbBookId(null));
+    }
+
+    [Fact]
     public void SerializeParameters_ProducesJsonObject()
     {
         Assert.Equal("{}", PluginPageBridge.SerializeParameters(null));
@@ -445,6 +492,244 @@ public class PluginPageTests
             Assert.Equal(
                 Visibility.Collapsed,
                 Find<StackPanel>(host, "PanelListFilters").Visibility);
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // PluginPageHost：list 封面列与行双击（阶段 4-4 扩展）
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void Host_ListTemplate_ShowsCoverColumnOnlyWhenRowsHaveThumbBookId()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+
+            // 旧插件：行内没有 thumb_book_id → 不出现封面列（列数完全不变）
+            host.ApplyLoad(ListResult(
+                page: 1, totalPages: 1, rows: 2, rowActions: 1, emptyText: ""));
+            var legacyGrid = Find<DataGrid>(host, "GridRows");
+            Assert.False(host.HasCoverColumn);
+            Assert.Equal(3, legacyGrid.Columns.Count); // 2 文本列 + 1 行动作列
+
+            // 收藏夹：行内带 thumb_book_id → 最左侧多出 40×56 封面列
+            host.ApplyLoad(CoverListResult(new[] { "123", "456" }, "detail"));
+            var grid = Find<DataGrid>(host, "GridRows");
+            Assert.True(host.HasCoverColumn);
+            Assert.Equal(5, grid.Columns.Count); // 封面 + 2 文本列 + 2 行动作列
+            Assert.IsType<DataGridTemplateColumn>(grid.Columns[0]);
+            Assert.Equal(56, grid.Columns[0].Width.Value);
+            Assert.Equal(string.Empty, grid.Columns[0].Header as string);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_LoadsCoversOnlyForRealizedRows()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var fetchCalls = new List<string>();
+            var host = NewHost(new FakePluginPageGateway());
+            host.CoverFetcher = bookId =>
+            {
+                fetchCalls.Add(bookId);
+                return Task.FromResult<byte[]?>(
+                    Convert.FromBase64String(OnePixelPngBase64));
+            };
+
+            string[] ids = Enumerable.Range(0, 40)
+                .Select(index => (index + 100).ToString())
+                .ToArray();
+            host.ApplyLoad(CoverListResult(ids, "detail"));
+
+            var grid = Find<DataGrid>(host, "GridRows");
+            LayoutList(host);
+
+            var realizedIds = new List<string>();
+            for (int index = 0; index < grid.Items.Count; index++)
+            {
+                if (grid.ItemContainerGenerator.ContainerFromIndex(index) is DataGridRow container
+                    && container.Item is PluginRowView row)
+                {
+                    realizedIds.Add(row.ThumbBookId);
+                }
+            }
+
+            // 虚拟化生效：只创建可视区内的行容器
+            Assert.NotEmpty(realizedIds);
+            Assert.True(
+                realizedIds.Count < grid.Items.Count,
+                "40 行应靠虚拟化只创建可见行容器");
+
+            // 只对“当前可见/已加载”的行取图：次数 = 已创建行容器数
+            Assert.Equal(realizedIds.Count, fetchCalls.Count);
+            Assert.Equal(
+                realizedIds.OrderBy(id => id, StringComparer.Ordinal),
+                fetchCalls.OrderBy(id => id, StringComparer.Ordinal));
+
+            // 已取到封面的行显示图片；取图不改变列表本身
+            Assert.All(
+                grid.Items.Cast<PluginRowView>()
+                    .Where(row => realizedIds.Contains(row.ThumbBookId)),
+                row => Assert.NotNull(row.Cover));
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_CoverFetchDeduplicatesByBookId()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var fetchCalls = new List<string>();
+            var host = NewHost(new FakePluginPageGateway());
+            host.CoverFetcher = bookId =>
+            {
+                fetchCalls.Add(bookId);
+                return Task.FromResult<byte[]?>(
+                    Convert.FromBase64String(OnePixelPngBase64));
+            };
+
+            host.ApplyLoad(CoverListResult(new[] { "123", "123" }, "detail"));
+            var grid = Find<DataGrid>(host, "GridRows");
+            var first = Assert.IsType<PluginRowView>(grid.Items[0]);
+            var second = Assert.IsType<PluginRowView>(grid.Items[1]);
+
+            await host.EnsureRowCoverAsync(first);
+            await host.EnsureRowCoverAsync(second);
+            // 行回收后再进入：仍然只复用缓存，不重新取图
+            await host.EnsureRowCoverAsync(first);
+
+            Assert.Equal(new[] { "123" }, fetchCalls);
+            Assert.NotNull(first.Cover);
+            Assert.Same(first.Cover, second.Cover);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_CoverFailureShowsXWithoutBreakingList()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var fetchCalls = new List<string>();
+            var host = NewHost(new FakePluginPageGateway());
+            host.CoverFetcher = bookId =>
+            {
+                fetchCalls.Add(bookId);
+                // "123" 取图失败；"456" 返回无法解码的字节（解码失败同样显示 X）
+                return Task.FromResult<byte[]?>(
+                    bookId == "123" ? null : [1, 2, 3]);
+            };
+
+            host.ApplyLoad(CoverListResult(new[] { "123", "456" }, "detail"));
+            var grid = Find<DataGrid>(host, "GridRows");
+            var noBytes = Assert.IsType<PluginRowView>(grid.Items[0]);
+            var badBytes = Assert.IsType<PluginRowView>(grid.Items[1]);
+
+            await host.EnsureRowCoverAsync(noBytes);
+            await host.EnsureRowCoverAsync(badBytes);
+
+            foreach (PluginRowView row in new[] { noBytes, badBytes })
+            {
+                Assert.Null(row.Cover);
+                Assert.True(row.CoverSettled);
+                Assert.Equal(Visibility.Visible, row.FailureVisibility);
+                Assert.Equal(Visibility.Collapsed, row.PlaceholderVisibility);
+                Assert.Equal(Visibility.Collapsed, row.CoverVisibility);
+            }
+
+            // 失败缓存：同一 book_id 不再重复取图
+            await host.EnsureRowCoverAsync(noBytes);
+            Assert.Equal(new[] { "123", "456" }, fetchCalls);
+
+            // 失败不影响列表渲染，也不弹错误框
+            Assert.Equal(2, grid.Items.Count);
+            Assert.Equal(Visibility.Visible, Find<Grid>(host, "PanelList").Visibility);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+
+            // 封面格真的显示暗红底 X（模板绑定生效，不只是行模型状态）
+            LayoutList(host);
+            var coverCell = grid.Columns[0].GetCellContent(noBytes) as FrameworkElement;
+            Assert.NotNull(coverCell);
+            coverCell!.UpdateLayout();
+            Assert.NotNull(FindVisualChild<TextBlock>(
+                coverCell,
+                block => block.Text == "X" && block.Visibility == Visibility.Visible));
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_DoubleClickRunsActionAndDispatchesIntent()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway
+            {
+                ActionResult = new PluginPageActionResultDto
+                {
+                    Ok = true,
+                    Intent = new PluginPageIntentDto { Kind = "detail", BookId = "123" },
+                },
+            };
+            var host = NewHost(gateway);
+            var handler = new FakeUiIntentHandler();
+            host.IntentHandler = handler;
+
+            host.ApplyLoad(CoverListResult(new[] { "123", "456" }, "detail"));
+            var grid = Find<DataGrid>(host, "GridRows");
+            grid.SelectedItem = grid.Items[0];
+
+            Assert.Equal("detail", host.RowDoubleClickAction);
+            grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+            {
+                RoutedEvent = Control.MouseDoubleClickEvent,
+            });
+            await WaitUntilAsync(() => gateway.ActionCalls.Count >= 1);
+
+            // 双击 = 以 {row, row_index, page} 调 page 级 row_double_click_action
+            Assert.StartsWith("detail:", gateway.ActionCalls[0]);
+            Assert.Contains("\"row_index\":0", gateway.ActionCalls[0]);
+            Assert.Contains("\"page\":1", gateway.ActionCalls[0]);
+            Assert.Contains("\"book_id\":\"123\"", gateway.ActionCalls[0]);
+
+            // 插件返回的 intent 原样交给注入的转发器（C# 不打开窗口）
+            PluginPageIntentDto intent = Assert.Single(handler.Intents);
+            Assert.Equal("detail", intent.Kind);
+            Assert.Equal("123", intent.BookId);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_DoubleClickWithoutActionDoesNothing()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+            host.ApplyLoad(CoverListResult(new[] { "123" }, rowDoubleClickAction: ""));
+            var grid = Find<DataGrid>(host, "GridRows");
+            grid.SelectedItem = grid.Items[0];
+
+            Assert.Equal(string.Empty, host.RowDoubleClickAction);
+            grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+            {
+                RoutedEvent = Control.MouseDoubleClickEvent,
+            });
+            await Task.Delay(50);
+            Assert.Empty(gateway.ActionCalls);
+
+            // 内部入口同样防御：动作 id 为空时双击不派发任何调用
+            await host.RunListRowDoubleClickAsync(
+                Assert.IsType<PluginRowView>(grid.Items[0]));
+            Assert.Empty(gateway.ActionCalls);
         });
     }
 
@@ -1381,6 +1666,93 @@ public class PluginPageTests
             "total_pages": {{totalPages}},
             "row_actions": [{{string.Join(",", actionList)}}],
             "empty_text": "{{emptyText}}"
+          }
+        }
+        """;
+
+        return Parse<PluginPageLoadResultDto>(json);
+    }
+
+    /// <summary>
+    /// 触发 DataGrid 的 Measure/Arrange（模拟真机可视区），让行虚拟化真正创建
+    /// 可视行容器（封面只对已创建容器取图）。
+    /// </summary>
+    private static void LayoutList(PluginPageHost host, double width = 900, double height = 600)
+    {
+        var grid = Find<DataGrid>(host, "GridRows");
+        if (grid.Parent is not FrameworkElement panel)
+        {
+            throw new InvalidOperationException("GridRows 没有可布局的父容器。");
+        }
+
+        panel.Measure(new Size(width, height));
+        panel.Arrange(new Rect(0, 0, width, height));
+        panel.UpdateLayout();
+        grid.UpdateLayout();
+    }
+
+    /// <summary>在视觉树里按条件找第一个后代（封面格模板断言用）。</summary>
+    private static T? FindVisualChild<T>(DependencyObject root, Func<T, bool> predicate)
+        where T : DependencyObject
+    {
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int index = 0; index < count; index++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(root, index);
+            if (child is T match && predicate(match))
+            {
+                return match;
+            }
+
+            if (FindVisualChild(child, predicate) is { } nested)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 收藏夹形态的 list payload（阶段 4-4 扩展）：每行带 thumb_book_id，
+    /// 页级带 row_double_click_action。
+    /// </summary>
+    private static PluginPageLoadResultDto CoverListResult(
+        IEnumerable<string> thumbBookIds,
+        string rowDoubleClickAction,
+        int page = 1)
+    {
+        string[] rows = thumbBookIds
+            .Select((bookId, index) =>
+                $"{{\"book_id\":\"{bookId}\",\"thumb_book_id\":\"{bookId}\","
+                + $"\"title\":\"标题{index + 1}\",\"author\":\"作者{index + 1}\","
+                + "\"page_count\":10,\"click_count\":20,\"updated\":\"2026-10-01\"}")
+            .ToArray();
+        string actionJson = rowDoubleClickAction
+            .Replace("\\", "\\\\")
+            .Replace("\"", "\\\"");
+
+        string json = $$"""
+        {
+          "ok": true,
+          "template": "list",
+          "title": "收藏夹",
+          "data": {
+            "columns": [
+              {"key": "title", "title": "标题"},
+              {"key": "author", "title": "作者", "width": 160}
+            ],
+            "rows": [{{string.Join(",", rows)}}],
+            "page": {{page}},
+            "page_size": 20,
+            "total": {{rows.Length}},
+            "total_pages": 1,
+            "row_actions": [
+              {"id": "detail", "title": "详情", "primary": true},
+              {"id": "download", "title": "下载"}
+            ],
+            "row_double_click_action": "{{actionJson}}",
+            "empty_text": "收藏夹是空的"
           }
         }
         """;
