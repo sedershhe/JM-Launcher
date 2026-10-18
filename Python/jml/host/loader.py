@@ -266,6 +266,11 @@ def _build_context(manifest: dict) -> PluginContext:
     def on_config_get(key: str) -> object:
         return config_store.get(key)
 
+    def on_config_set(key: str, value: object) -> None:
+        # 与主设置窗口 set_plugin_setting 共用同一份 PluginConfig：
+        # schema 校验只有一处，写入同样原子落盘（阶段 4 小扩展）
+        config_store.set(key, value)
+
     def on_log(message: str) -> None:
         # 宿主日志：自动带插件前缀（当前走 stdout，阶段 1 简化实现；
         # 后续接主日志通道时替换这里，接口不变）
@@ -309,6 +314,7 @@ def _build_context(manifest: dict) -> PluginContext:
         on_subscribe=on_subscribe,
         on_get_service=on_get_service,
         on_config_get=on_config_get,
+        on_config_set=on_config_set,
         on_log=on_log,
         on_register_page=on_register_page,
         on_register_page_action=on_register_page_action,

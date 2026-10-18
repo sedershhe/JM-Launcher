@@ -1,7 +1,7 @@
 """PluginContext——传给插件 setup 的唯一对象（对应旧缺陷 #9）。
 
 - 插件只能通过本对象与宿主交互：register_service / subscribe /
-  get_service / call_service / config_get / log，以及结构化页面协议的
+  get_service / call_service / config_get / config_set / log，以及结构化页面协议的
   register_page / register_page_action / register_page_image，**只暴露这些方法**；
   另有 plugin_id / data_dir 两个只读属性
 - 插件不许摸宿主私有属性：本类不持有 registry/bus 的引用，全部通过
@@ -41,6 +41,7 @@ class PluginContext:
         on_subscribe: Callable[[str, Callable], None],
         on_get_service: Callable[[str, int], object],
         on_config_get: Callable[[str], object],
+        on_config_set: Callable[[str, object], None],
         on_log: Callable[[str], None],
         on_register_page: Callable[[str, Callable], None],
         on_register_page_action: Callable[[str, str, Callable], None],
@@ -53,6 +54,7 @@ class PluginContext:
         self.__on_subscribe = on_subscribe
         self.__on_get_service = on_get_service
         self.__on_config_get = on_config_get
+        self.__on_config_set = on_config_set
         self.__on_log = on_log
         self.__on_register_page = on_register_page
         self.__on_register_page_action = on_register_page_action
@@ -76,7 +78,7 @@ class PluginContext:
         """
         return self.__data_dir
 
-    # -- 插件可调用的方法（仅此九个） ---------------------------------------
+    # -- 插件可调用的方法（仅此十个） ---------------------------------------
 
     def register_service(self, name: str, version: int, ref: object) -> None:
         """注册本插件提供的服务（转发给宿主服务注册表）。
@@ -128,6 +130,18 @@ class PluginContext:
     def config_get(self, key: str) -> object:
         """读本插件的配置项（无值时返回 schema 默认值）。"""
         return self.__on_config_get(key)
+
+    def config_set(self, key: str, value: object) -> None:
+        """写本插件自己的配置项（schema 校验 + 原子落盘，阶段 4 小扩展）。
+
+        与主设置窗口的 ``set_plugin_setting`` 写的是**同一个**配置实例与
+        ``config.json``：校验规则只在 schema 里维护一份，非法值抛
+        ``ConfigError`` 且当前值与磁盘都不变。
+
+        插件只能写自己 manifest ``config.schema`` 里声明过的 key（宿主闭包
+        已绑定本插件 id，没有参数能改别人配置）；不允许借此写别的插件目录。
+        """
+        self.__on_config_set(key, value)
 
     # -- 结构化页面协议（技术方案第三节方案 A） ---------------------------
 

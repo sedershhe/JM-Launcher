@@ -445,6 +445,7 @@ def test_plugin_search_session_isolated_from_main():
         on_subscribe=lambda event_type, handler: None,
         on_get_service=on_get_service,
         on_config_get=lambda key: None,
+        on_config_set=lambda key, value: None,
         on_log=lambda message: None,
         on_register_page=lambda page_id, loader: None,
         on_register_page_action=lambda page_id, action_id, handler: None,

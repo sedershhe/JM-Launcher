@@ -36,6 +36,8 @@ ERROR_PERMISSION_DENIED = "PERMISSION_DENIED"
 ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 ERROR_FILE_EXISTS = "FILE_EXISTS"
 ERROR_ARCHIVE_INVALID = "ARCHIVE_INVALID"
+ERROR_ARCHIVE_CLOSED = "ARCHIVE_CLOSED"
+ERROR_PAGE_OUT_OF_RANGE = "PAGE_OUT_OF_RANGE"
 ERROR_IMAGE_INVALID = "IMAGE_INVALID"
 ERROR_INVALID_DATA = "INVALID_DATA"
 ERROR_IO = "IO_ERROR"
@@ -61,6 +63,8 @@ ERROR_MESSAGES: dict[str, str] = {
     ERROR_FILE_NOT_FOUND: "文件或目录不存在",
     ERROR_FILE_EXISTS: "同名文件已存在",
     ERROR_ARCHIVE_INVALID: "不是有效的 ZIP 压缩包",
+    ERROR_ARCHIVE_CLOSED: "压缩包已关闭",
+    ERROR_PAGE_OUT_OF_RANGE: "页码超出范围",
     ERROR_IMAGE_INVALID: "图片无法解码或像素无效",
     ERROR_INVALID_DATA: "数据格式不合法",
     ERROR_IO: "文件读写失败",
@@ -113,6 +117,28 @@ class ArchiveError(AppError):
     """打包/校验失败。"""
 
     error_code = ERROR_ARCHIVE_INVALID
+
+
+class ArchiveNotFoundError(AppError):
+    """压缩包文件不存在（ZIP 浏览插件：选中的 ZIP 被删除/移动）。"""
+
+    error_code = ERROR_FILE_NOT_FOUND
+
+
+class ArchiveClosedError(AppError):
+    """压缩包句柄已关闭（读图前必须先 ``list_images`` 打开）。
+
+    ZIP 浏览插件用它区分"包不存在/无效"与"句柄被关闭"：关闭后必须由调用方
+    重新打开才能取图，不静默重开（否则跨插件复用会掩盖调用方的状态错误）。
+    """
+
+    error_code = ERROR_ARCHIVE_CLOSED
+
+
+class PageOutOfRangeError(AppError):
+    """图片页码超出当前压缩包范围（0 起，含负数与非法值）。"""
+
+    error_code = ERROR_PAGE_OUT_OF_RANGE
 
 
 class InvalidDataError(AppError):

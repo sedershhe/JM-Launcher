@@ -50,6 +50,9 @@ public partial class PluginPageHost : UserControl
     private bool _viewingImage;
     private bool _goingBackToList;
 
+    // browser 文件夹选择（阶段 4-2 协议小扩展：allow_folder_choice / folder）
+    private string _folder = string.Empty;
+
     /// <summary>本页所属插件 id（由 MainWindow 传入）。</summary>
     public string PluginId { get; }
 
@@ -58,6 +61,19 @@ public partial class PluginPageHost : UserControl
 
     /// <summary>页面标题（优先取 Python 返回的 manifest 标题）。</summary>
     public string PageTitle { get; private set; }
+
+    /// <summary>
+    /// 文件夹选择器（生产用 <see cref="Microsoft.Win32.OpenFolderDialog"/>；
+    /// STA 测试注入假实现，避免真的弹系统对话框）。返回 null / 空串 = 用户取消。
+    /// </summary>
+    internal Func<string?>? FolderPicker { get; set; }
+
+    /// <summary>当前已选文件夹（Python 的 <c>data.folder</c>，回传时带上）。</summary>
+    internal string CurrentFolder => _folder;
+
+    /// <summary>「选择文件夹…」按钮是否可见（由 Python 的 allow_folder_choice 决定）。</summary>
+    internal bool IsFolderChoiceVisible =>
+        BtnChooseFolder.Visibility == Visibility.Visible;
 
     /// <summary>设计器 / 默认为空页（未传 plugin_id/page_id 时不发任何调用）。</summary>
     public PluginPageHost()
@@ -118,6 +134,7 @@ public partial class PluginPageHost : UserControl
             {
                 ["page"] = requested,
             };
+            AddFolderParameter(parameters);
             ShowStatus("正在加载页面…");
             PluginPageLoadResultDto result =
                 await _gateway.LoadAsync(PluginId, PageId, parameters);
@@ -331,6 +348,18 @@ public partial class PluginPageHost : UserControl
 
         ShowOnly(PanelBrowser);
 
+        // 阶段 4-2 协议小扩展：是否显示「选择文件夹…」按钮、当前目录是什么，
+        // 全部由 Python 决定（C# 只按布尔值选可见性，不判断业务状态）。
+        bool allowFolderChoice = ReadJsonBool(data, "allow_folder_choice");
+        if (TryReadJsonString(data, "folder", out string folder))
+        {
+            _folder = folder;
+        }
+
+        BtnChooseFolder.Visibility = allowFolderChoice
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
         _fileItems.Clear();
         _fileItems.AddRange(page.Items);
         BrowserFileList.ItemsSource = _fileItems.Select(item => item.Name).ToList();
@@ -391,6 +420,77 @@ public partial class PluginPageHost : UserControl
         BtnImageNext.IsEnabled = _imageCount > 0 && _imageIndex + 1 < _imageCount;
     }
 
+    /// <summary>
+    /// 选定文件夹后以 <c>{page: 1, folder, item_index: -1}</c> 重新 load
+    /// （阶段 4-2：列哪个目录、有没有 ZIP、空态文案全部由 Python 决定）。
+    /// </summary>
+    internal async Task LoadBrowserFolderAsync(string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            return;
+        }
+
+        try
+        {
+            _folder = folder.Trim();
+            var parameters = new Dictionary<string, object?>
+            {
+                ["page"] = 1,
+                ["folder"] = _folder,
+                ["item_index"] = -1,
+            };
+            ShowStatus("正在加载页面…");
+            PluginPageLoadResultDto result =
+                await _gateway.LoadAsync(PluginId, PageId, parameters);
+            ApplyLoad(result);
+            if (result.Ok)
+            {
+                ClearStatus();
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+        }
+    }
+
+    private async void BtnChooseFolder_Click(object sender, RoutedEventArgs e)
+    {
+        string? folder;
+        try
+        {
+            // 生产弹系统文件夹选择框；STA 测试注入假实现（不真的弹窗）
+            folder = FolderPicker is { } picker ? picker() : PickFolderWithDialog();
+        }
+        catch (Exception ex)
+        {
+            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+            return;
+        }
+
+        await LoadBrowserFolderAsync(folder ?? string.Empty);
+    }
+
+    /// <summary>系统文件夹选择框：只返回路径，不做任何业务判断。</summary>
+    private static string? PickFolderWithDialog()
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "选择压缩包文件夹",
+        };
+        return dialog.ShowDialog() == true ? dialog.FolderName : null;
+    }
+
+    /// <summary>把当前目录作为 <c>folder</c> 参数带给 Python（未选目录时不带）。</summary>
+    private void AddFolderParameter(Dictionary<string, object?> parameters)
+    {
+        if (!string.IsNullOrEmpty(_folder))
+        {
+            parameters["folder"] = _folder;
+        }
+    }
+
     /// <summary>打开文件列表中的某个条目（index = -1 表示回到列表）。</summary>
     internal async Task LoadBrowserItemAsync(int itemIndex, int imageIndex = 0)
     {
@@ -402,6 +502,7 @@ public partial class PluginPageHost : UserControl
                 ["item_index"] = itemIndex,
                 ["image_index"] = imageIndex,
             };
+            AddFolderParameter(parameters);
             ShowStatus("正在加载页面…");
             PluginPageLoadResultDto result =
                 await _gateway.LoadAsync(PluginId, PageId, parameters);
@@ -750,6 +851,38 @@ public partial class PluginPageHost : UserControl
     // ------------------------------------------------------------------
     // 通用
     // ------------------------------------------------------------------
+
+    /// <summary>读可选的布尔字段（缺省 / 类型不符 → fallback）。</summary>
+    private static bool ReadJsonBool(JsonElement data, string name, bool fallback = false)
+    {
+        if (data.ValueKind != JsonValueKind.Object
+            || !data.TryGetProperty(name, out JsonElement value))
+        {
+            return fallback;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => fallback,
+        };
+    }
+
+    /// <summary>读可选的字符串字段；字段缺失或不是字符串时返回 false。</summary>
+    private static bool TryReadJsonString(JsonElement data, string name, out string value)
+    {
+        value = string.Empty;
+        if (data.ValueKind != JsonValueKind.Object
+            || !data.TryGetProperty(name, out JsonElement element)
+            || element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = element.GetString() ?? string.Empty;
+        return true;
+    }
 
     /// <summary>列表总页数：优先用 Python 给的 total_pages，否则按 total/page_size 推算。</summary>
     private static int ResolveTotalPages(

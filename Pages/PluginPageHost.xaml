@@ -97,12 +97,22 @@
 
                 <!-- 左：文件列表 + 列表分页 -->
                 <DockPanel Grid.Column="0" Margin="0,0,12,0">
-                    <TextBlock DockPanel.Dock="Top"
-                               Text="文件"
-                               FontSize="13"
-                               FontWeight="SemiBold"
-                               Margin="0,0,0,6"
-                               Foreground="{DynamicResource ColorBrush1}" />
+                    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                        <TextBlock Text="文件"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource ColorBrush1}" />
+                        <!-- 文件夹选择：仅当 browser payload 的 allow_folder_choice 为真时显示
+                             （ZIP 浏览插件用；C# 只负责选目录并把 folder 参数回传 Python） -->
+                        <Button x:Name="BtnChooseFolder"
+                                Content="选择文件夹…"
+                                Style="{StaticResource SecondaryButton}"
+                                HorizontalAlignment="Left"
+                                MinWidth="120"
+                                Margin="0,6,0,0"
+                                Visibility="Collapsed"
+                                Click="BtnChooseFolder_Click" />
+                    </StackPanel>
                     <StackPanel x:Name="PanelFilePager"
                                 DockPanel.Dock="Bottom"
                                 Orientation="Horizontal"

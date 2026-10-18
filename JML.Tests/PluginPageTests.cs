@@ -467,6 +467,131 @@ public class PluginPageTests
     }
 
     [Fact]
+    public void Host_BrowserFolderChoice_ShowsButtonOnlyWhenAllowed()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+
+            // ZIP 浏览插件首个状态：没有目录 → 按钮可见、空态提示「选择文件夹…」
+            host.ApplyLoad(BrowserResult(
+                itemIndex: -1,
+                imageIndex: 0,
+                imageCount: 0,
+                itemCount: 0,
+                emptyText: "选择文件夹…",
+                allowFolderChoice: true));
+            Assert.True(host.IsFolderChoiceVisible);
+            Assert.Equal("选择文件夹…", Find<Button>(host, "BtnChooseFolder").Content as string);
+            Assert.Equal("选择文件夹…", Find<TextBlock>(host, "TextBrowserEmpty").Text);
+
+            // Python 不允许（或普通 browser 页）→ 按钮隐藏，可见性不自己做业务判断
+            host.ApplyLoad(BrowserResult(
+                itemIndex: -1,
+                imageIndex: 0,
+                imageCount: 0,
+                itemCount: 2,
+                allowFolderChoice: false,
+                folder: "C:/z"));
+            Assert.False(host.IsFolderChoiceVisible);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<Button>(host, "BtnChooseFolder").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserFolderChoice_ClickReloadsWithFolderParam()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            gateway.PendingLoads.Enqueue(BrowserResult(
+                itemIndex: -1,
+                imageIndex: 0,
+                imageCount: 0,
+                itemCount: 2,
+                allowFolderChoice: true,
+                folder: @"D:\zip-fixture"));
+            var host = NewHost(gateway);
+            host.FolderPicker = () => @"D:\zip-fixture";
+
+            host.ApplyLoad(BrowserResult(
+                itemIndex: -1,
+                imageIndex: 0,
+                imageCount: 0,
+                itemCount: 0,
+                emptyText: "选择文件夹…",
+                allowFolderChoice: true));
+            var button = Find<Button>(host, "BtnChooseFolder");
+            Assert.Equal(Visibility.Visible, button.Visibility);
+
+            // 等价于用户点击「选择文件夹…」：文件夹选择器已注入假实现
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await WaitUntilAsync(() => gateway.LoadCalls.Count >= 1);
+
+            using (JsonDocument document = JsonDocument.Parse(gateway.LoadCalls[0]))
+            {
+                JsonElement root = document.RootElement;
+                Assert.Equal(1, root.GetProperty("page").GetInt32());
+                Assert.Equal(-1, root.GetProperty("item_index").GetInt32());
+                Assert.Equal(@"D:\zip-fixture", root.GetProperty("folder").GetString());
+            }
+            Assert.Equal(@"D:\zip-fixture", host.CurrentFolder);
+
+            // 之后翻文件页仍带同一个 folder（目录状态由 C# 保持，内容由 Python 决定）
+            await host.LoadAsync(2);
+            using (JsonDocument document = JsonDocument.Parse(gateway.LoadCalls[1]))
+            {
+                Assert.Equal(
+                    @"D:\zip-fixture",
+                    document.RootElement.GetProperty("folder").GetString());
+            }
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserFolderChoice_CancelKeepsPageWithoutReload()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+            host.FolderPicker = () => null; // 用户点了取消
+
+            host.ApplyLoad(BrowserResult(
+                itemIndex: -1,
+                imageIndex: 0,
+                imageCount: 0,
+                itemCount: 0,
+                emptyText: "选择文件夹…",
+                allowFolderChoice: true));
+
+            Find<Button>(host, "BtnChooseFolder")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Task.Delay(50);
+
+            Assert.Empty(gateway.LoadCalls);
+            Assert.Equal(Visibility.Collapsed, Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    /// <summary>轮询等待界面线程上的异步操作完成（不依赖真实计时赛跑）。</summary>
+    private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 5000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (!condition())
+        {
+            if (Environment.TickCount64 > deadline)
+            {
+                throw new TimeoutException("等待异步界面操作超时");
+            }
+
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
     public void Host_AwaitFlow_UsesGatewayAndRendersTemplate()
     {
         UiSmokeTests.RunOnUiThreadAsync(async () =>
@@ -706,10 +831,14 @@ public class PluginPageTests
         int imageIndex,
         int imageCount,
         int itemCount,
-        string emptyText = "")
+        string emptyText = "",
+        bool allowFolderChoice = false,
+        string folder = "")
     {
         var items = Enumerable.Range(0, itemCount)
             .Select(index => $"{{\"name\":\"{index + 1:000}.zip\",\"path\":\"C:/z/{index + 1:000}.zip\"}}");
+        // 路径里的反斜杠与引号按 JSON 规则转义（测试只喂普通路径）
+        string folderJson = folder.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
         string json = $$"""
         {
@@ -725,7 +854,9 @@ public class PluginPageTests
             "item_index": {{itemIndex}},
             "image_index": {{imageIndex}},
             "image_count": {{imageCount}},
-            "empty_text": "{{emptyText}}"
+            "empty_text": "{{emptyText}}",
+            "folder": "{{folderJson}}",
+            "allow_folder_choice": {{(allowFolderChoice ? "true" : "false")}}
           }
         }
         """;
