@@ -30,7 +30,9 @@ class ProviderWithoutCall:
     pass
 
 
-def _make_context(services: dict[tuple[str, int], object]) -> PluginContext:
+def _make_context(
+    services: dict[tuple[str, int], object], data_dir: str = ""
+) -> PluginContext:
     def on_get_service(name: str, version: int) -> object:
         key = (name, version)
         if key not in services:
@@ -47,6 +49,7 @@ def _make_context(services: dict[tuple[str, int], object]) -> PluginContext:
         on_register_page=lambda page_id, loader: None,
         on_register_page_action=lambda page_id, action_id, handler: None,
         on_register_page_image=lambda page_id, resolver: None,
+        data_dir=data_dir,
     )
 
 
@@ -103,6 +106,7 @@ def test_call_service_wraps_host_lookup_error_as_service_error():
         on_register_page=lambda page_id, loader: None,
         on_register_page_action=lambda page_id, action_id, handler: None,
         on_register_page_image=lambda page_id, resolver: None,
+        data_dir="",
     )
 
     with pytest.raises(ServiceError):
@@ -131,3 +135,12 @@ def test_context_does_not_expose_host_objects():
         "register_page_image",
         "log",
     }
+
+
+def test_context_exposes_read_only_data_dir():
+    """宿主传入的数据目录只读暴露：插件用它落盘，但不自己拼 APPDATA 路径。"""
+    ctx = _make_context({}, data_dir="C:/tmp/jml-plugin-data")
+
+    assert ctx.data_dir == "C:/tmp/jml-plugin-data"
+    with pytest.raises(AttributeError):
+        ctx.data_dir = "C:/tmp/other"

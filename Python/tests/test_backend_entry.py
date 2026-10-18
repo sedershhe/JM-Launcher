@@ -449,6 +449,7 @@ def test_plugin_search_session_isolated_from_main():
         on_register_page=lambda page_id, loader: None,
         on_register_page_action=lambda page_id, action_id, handler: None,
         on_register_page_image=lambda page_id, resolver: None,
+        data_dir="",
     )
 
     plugin_first = ctx.call_service(

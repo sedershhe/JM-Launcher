@@ -2,10 +2,14 @@
 
 - 插件只能通过本对象与宿主交互：register_service / subscribe /
   get_service / call_service / config_get / log，以及结构化页面协议的
-  register_page / register_page_action / register_page_image，**只暴露这些方法**
+  register_page / register_page_action / register_page_image，**只暴露这些方法**；
+  另有 plugin_id / data_dir 两个只读属性
 - 插件不许摸宿主私有属性：本类不持有 registry/bus 的引用，全部通过
   注册回调闭包转发（插件在 ctx 上拿不到任何宿主内部对象）
 - ctx 内保存 plugin_id，log 打日志时自动带前缀 [plugin:xxx]
+- data_dir 是宿主（loader）创建并传入的**绝对路径**可写数据目录
+  （%APPDATA%/JML/plugins/<plugin_id>/data），插件只拿路径、不自己推导
+  APPDATA 位置（避免路径探测与硬编码）
 
 结构化页面协议（技术方案第三节方案 A）：
 插件在这里注册“页面钩子”，宿主 ``plugin_page_load`` / ``plugin_page_action`` /
@@ -41,6 +45,7 @@ class PluginContext:
         on_register_page: Callable[[str, Callable], None],
         on_register_page_action: Callable[[str, str, Callable], None],
         on_register_page_image: Callable[[str, Callable], None],
+        data_dir: str,
     ) -> None:
         # 双下划线命名 + 只在方法里用：插件不应直接访问这些字段
         self.__plugin_id = plugin_id
@@ -52,6 +57,7 @@ class PluginContext:
         self.__on_register_page = on_register_page
         self.__on_register_page_action = on_register_page_action
         self.__on_register_page_image = on_register_page_image
+        self.__data_dir = data_dir
 
     # -- 插件可见的属性（只读） ---------------------------------------------
 
@@ -59,6 +65,16 @@ class PluginContext:
     def plugin_id(self) -> str:
         """本插件的 id（manifest 中声明）。"""
         return self.__plugin_id
+
+    @property
+    def data_dir(self) -> str:
+        """本插件专属的可写数据目录（宿主创建并传入的绝对路径）。
+
+        路径规则：%APPDATA%/JML/plugins/<plugin_id>/data（由 loader 统一
+        推导并确保目录存在）。插件只在此目录下读写自己的数据文件，不得
+        自行拼 %APPDATA% 路径，也不得读写别的插件目录。
+        """
+        return self.__data_dir
 
     # -- 插件可调用的方法（仅此九个） ---------------------------------------
 

@@ -221,10 +221,34 @@ def _load_single(manifest: dict) -> None:
     setup(ctx)  # 抛异常由 load_all 捕获（该插件标记失败，不影响其它）
 
 
+def plugin_data_dir(plugin_id: str) -> str:
+    """插件可写数据目录：%APPDATA%/JML/plugins/{plugin_id}/data。
+
+    与配置文件同根（``config.py`` 的 config.json 位于上一级目录），由宿主
+    统一推导并创建，插件只拿绝对路径（插件里不拼 APPDATA 路径）。
+    APPDATA 缺失时回退到用户主目录（与 config.py 的保底规则一致）。
+    """
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "JML", "plugins", plugin_id, "data")
+
+
+def _create_data_dir(plugin_id: str) -> str:
+    """创建插件数据目录并返回路径；失败属装配错误（该插件加载失败）。"""
+    directory = plugin_data_dir(plugin_id)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as exc:
+        raise PluginError(
+            f"插件 {plugin_id} 的数据目录创建失败: {exc}"
+        ) from exc
+    return directory
+
+
 def _build_context(manifest: dict) -> PluginContext:
     """为插件构造 PluginContext（回调全部闭包转发，插件摸不到宿主对象）。"""
     plugin_id = manifest["id"]
     config_store = _get_or_create_config(manifest)
+    data_dir = _create_data_dir(plugin_id)
     #: 本插件 manifest 声明过的页面 id（页面注册的唯一合法集合）
     declared_pages = {
         page["id"] for page in manifest["pages"] if isinstance(page.get("id"), str)
@@ -289,6 +313,7 @@ def _build_context(manifest: dict) -> PluginContext:
         on_register_page=on_register_page,
         on_register_page_action=on_register_page_action,
         on_register_page_image=on_register_page_image,
+        data_dir=data_dir,
     )
 
 
