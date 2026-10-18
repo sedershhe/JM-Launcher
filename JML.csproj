@@ -9,7 +9,8 @@
     <RootNamespace>JML</RootNamespace>
     <AssemblyName>JML</AssemblyName>
 
-    <!-- 程序图标与文件元信息（阶段 5）：图标沿用 PCL2 icon.ico（用户已确认开源可沿用） -->
+    <!-- 程序图标与文件元信息（阶段 5）：图标为 JML 自有蓝色六边形徽标（Assets\icon.ico，
+         源图 Assets\JML_logo_20261018_v1.0.png）；原先沿用的 PCL2 图标已被替换 -->
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <AssemblyTitle>JM Launcher</AssemblyTitle>
     <Product>JM Launcher</Product>
