@@ -22,12 +22,33 @@
                   IsReadOnly="True"
                   CanUserAddRows="False"
                   CanUserDeleteRows="False"
-                  SelectionChanged="GridPlugins_SelectionChanged">
+                  SelectionChanged="GridPlugins_SelectionChanged"
+                  MouseDoubleClick="GridPlugins_MouseDoubleClick">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="2*" />
                 <DataGridTextColumn Header="版本" Binding="{Binding Version}" Width="80" />
                 <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="220" />
-                <DataGridTextColumn Header="说明" Binding="{Binding Description}" Width="3*" />
+                <!-- 说明：单元格里截断 + 省略号，悬停 ToolTip 显示完整多行说明；
+                     双击行打开详情窗看全文。 -->
+                <DataGridTemplateColumn Header="说明" Width="3*">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Description}"
+                                       TextTrimming="CharacterEllipsis"
+                                       HorizontalAlignment="Stretch"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource ColorBrush1}">
+                                <TextBlock.ToolTip>
+                                    <ToolTip MaxWidth="480">
+                                        <TextBlock Text="{Binding Description}"
+                                                   TextWrapping="Wrap"
+                                                   FontSize="12" />
+                                    </ToolTip>
+                                </TextBlock.ToolTip>
+                            </TextBlock>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
             </DataGrid.Columns>
         </DataGrid>
 

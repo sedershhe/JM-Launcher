@@ -63,6 +63,10 @@ public partial class PluginPageHost : UserControl
     // action 模板：当前可打开的网址（空串 = 不显示「在浏览器中打开」按钮）
     private string _actionUrl = string.Empty;
 
+    // 最近一次「动作成功后自动唤起浏览器」的网址：同一 url 成功打开后不再重复，
+    // 失败（或页面已不再指向该 url）时清空，允许用户重试。
+    private string _autoOpenedUrl = string.Empty;
+
     /// <summary>本页所属插件 id（由 MainWindow 传入）。</summary>
     public string PluginId { get; }
 
@@ -123,6 +127,9 @@ public partial class PluginPageHost : UserControl
     public PluginPageHost(string pluginId, string pageId, string title)
         : this(pluginId, pageId, title, null)
     {
+        // 生产注入：动作返回 url 时用系统 Shell 打开。STA 测试走内部构造函数
+        // 注入 fake，绝不真的唤起本机浏览器。
+        BrowserOpener = OpenWithSystemShell;
     }
 
     /// <summary>按插件 + 页面构造宿主；<paramref name="gateway"/> 仅测试注入假实现。</summary>
@@ -901,6 +908,13 @@ public partial class PluginPageHost : UserControl
             _actionUrl = url;
         }
 
+        // 页面刷新/重渲染只更新按钮，不自动弹浏览器；若页面已不再指向自动打开过的
+        // 地址（停止服务后 url 变空、或换了新地址），清掉幂等标记，允许新操作重新打开。
+        if (!string.Equals(_autoOpenedUrl, _actionUrl, StringComparison.Ordinal))
+        {
+            _autoOpenedUrl = string.Empty;
+        }
+
         BtnActionOpenBrowser.Visibility = string.IsNullOrEmpty(_actionUrl)
             ? Visibility.Collapsed
             : Visibility.Visible;
@@ -974,34 +988,100 @@ public partial class PluginPageHost : UserControl
         _ = LoadAsync(1);
     }
 
+    /// <summary>生产默认浏览器打开器：系统 Shell（UseShellExecute=true）转发 http(s)。</summary>
+    private static bool OpenWithSystemShell(string url)
+    {
+        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        return true;
+    }
+
     /// <summary>
-    /// 「在浏览器中打开」：**只转发** Python 给出的网址，不在 C# 里判断业务状态。
-    /// 生产用 <see cref="Process.Start(ProcessStartInfo)"/>（UseShellExecute=true）
-    /// 唤起系统默认浏览器；STA 测试注入 <see cref="BrowserOpener"/> 断言转发。
+    /// 「在浏览器中打开」按钮：备用入口。用户显式点击时总是转发一次，
+    /// 不参与自动打开的幂等判断。
     /// </summary>
     private void BtnActionOpenBrowser_Click(object sender, RoutedEventArgs e)
     {
-        string url = _actionUrl;
-        if (string.IsNullOrWhiteSpace(url))
+        if (string.IsNullOrWhiteSpace(_actionUrl))
         {
             return;
         }
 
+        OpenBrowser(_actionUrl, userInitiated: true);
+    }
+
+    /// <summary>
+    /// 动作成功返回 <c>data.url</c>（http/https 绝对地址）时自动唤起一次浏览器。
+    /// 只由动作结果触发：页面刷新 / 重新渲染同一 url 不会再次弹浏览器。
+    /// </summary>
+    private void TryAutoOpenActionUrl(JsonElement? data)
+    {
+        if (!string.Equals(_template, "action", StringComparison.Ordinal)
+            || data is not { } element
+            || element.ValueKind != JsonValueKind.Object
+            || !TryReadJsonString(element, "url", out string url)
+            || !IsHttpUrl(url))
+        {
+            return;
+        }
+
+        OpenBrowser(url, userInitiated: false);
+    }
+
+    /// <summary>
+    /// 打开一次系统浏览器。<paramref name="userInitiated"/>=true（用户点按钮）总是转发；
+    /// false（动作结果自动唤起）时，同一 url 成功打开过后不再重复，失败则允许重试。
+    /// 打开失败在页面状态区显示可读错误（url + 异常类型，均已脱敏），不静默。
+    /// </summary>
+    private bool OpenBrowser(string url, bool userInitiated)
+    {
+        if (!IsHttpUrl(url))
+        {
+            return false;
+        }
+
+        if (!userInitiated && string.Equals(url, _autoOpenedUrl, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         try
         {
-            if (BrowserOpener is { } opener)
+            bool forwarded = BrowserOpener is { } opener
+                ? opener(url)
+                : OpenWithSystemShell(url);
+            if (!forwarded)
             {
-                _ = opener(url);
-                return;
+                if (!userInitiated)
+                {
+                    _autoOpenedUrl = string.Empty;
+                }
+
+                ShowBrowserOpenError(url, "打开器未转发");
+                return false;
             }
 
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            if (!userInitiated)
+            {
+                _autoOpenedUrl = url;
+            }
+
+            return true;
         }
         catch (Exception ex)
         {
-            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+            if (!userInitiated)
+            {
+                _autoOpenedUrl = string.Empty;
+            }
+
+            ShowBrowserOpenError(url, ex.GetType().Name);
+            return false;
         }
     }
+
+    /// <summary>打开失败不静默：状态区显示 <c>[OPEN_FAILED] 打开浏览器失败：url（异常类型）</c>。</summary>
+    private void ShowBrowserOpenError(string url, string detail) =>
+        ShowError("OPEN_FAILED", $"打开浏览器失败：{url}（{detail}）");
 
     // ------------------------------------------------------------------
     // 动作结果
@@ -1066,6 +1146,8 @@ public partial class PluginPageHost : UserControl
         if (result.Refresh)
         {
             await LoadAsync(_template == "browser" ? _filePage : _listPage);
+            // 重载会清掉临时错误，自动唤起放在重载之后，失败文案才不会被覆盖。
+            TryAutoOpenActionUrl(result.Data);
             return;
         }
 
@@ -1079,6 +1161,9 @@ public partial class PluginPageHost : UserControl
                 Data = data,
             });
         }
+
+        // 动作成功且 data.url 是 http(s) 绝对地址 → 自动唤起一次浏览器。
+        TryAutoOpenActionUrl(result.Data);
     }
 
     /// <summary>

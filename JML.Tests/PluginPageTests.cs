@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -1028,6 +1029,221 @@ public class PluginPageTests
         });
     }
 
+    // ------------------------------------------------------------------
+    // PluginPageHost：action 成功返回 data.url → 自动唤起浏览器（缺陷 1）
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void Host_ActionWithUrl_AutoOpensBrowserOnce()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            var opened = new List<string>();
+            host.BrowserOpener = url =>
+            {
+                opened.Add(url);
+                return true;
+            };
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+
+            Assert.Equal(new[] { url }, opened);
+            Assert.True(host.IsOpenInBrowserVisible);
+            Assert.Equal(url, host.CurrentActionUrl);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_ActionWithUrl_RefreshPathStillOpensAfterReload()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            // zip_web 的真实返回形态：refresh=true + data.url。旧的 refresh 分支
+            // 直接 return，既没读 data.url，也不会打开浏览器（缺陷 1 真因）。
+            var gateway = new FakePluginPageGateway();
+            gateway.PendingLoads.Enqueue(ActionResult(
+                state: "running",
+                statusText: "正在浏览：http://127.0.0.1:51234/",
+                actionCount: 1,
+                itemCount: 1,
+                port: 51234,
+                url: "http://127.0.0.1:51234/"));
+            var host = NewHost(gateway);
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            var opened = new List<string>();
+            host.BrowserOpener = url =>
+            {
+                opened.Add(url);
+                return true;
+            };
+
+            await host.ApplyActionResultAsync(
+                ActionResultWithUrl("http://127.0.0.1:51234/", refresh: true));
+
+            Assert.Single(gateway.LoadCalls);
+            Assert.Equal(new[] { "http://127.0.0.1:51234/" }, opened);
+            Assert.True(host.IsOpenInBrowserVisible);
+        });
+    }
+
+    [Fact]
+    public void Host_SameUrl_RerenderAndRepeatActionDoNotReopenBrowser()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            int calls = 0;
+            host.BrowserOpener = _ =>
+            {
+                calls++;
+                return true;
+            };
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+
+            // 页面刷新 / 同一 url 重新渲染：只更新按钮，不再弹浏览器
+            host.ApplyLoad(ActionResult(
+                state: "running",
+                statusText: "正在浏览",
+                actionCount: 1,
+                itemCount: 1,
+                port: 51234,
+                url: url));
+            // 同一 url 的后续动作结果（非用户操作）：保持幂等
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+
+            Assert.Equal(1, calls);
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserOpenFailure_ShowsUrlAndExceptionType()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+            host.BrowserOpener = _ => throw new Win32Exception(5, "拒绝访问。");
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+
+            var error = Find<TextBlock>(host, "TextError");
+            Assert.Equal(Visibility.Visible, error.Visibility);
+            Assert.Contains("[OPEN_FAILED]", error.Text);
+            Assert.Contains(url, error.Text);
+            Assert.Contains(nameof(Win32Exception), error.Text);
+            // 失败不崩：页面仍然可用，并保留「在浏览器中打开」备用按钮
+            Assert.True(host.IsOpenInBrowserVisible);
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserOpenFailure_AfterRefreshReloadIsNotCleared()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            gateway.PendingLoads.Enqueue(ActionResult(
+                state: "running",
+                statusText: "正在浏览",
+                actionCount: 1,
+                itemCount: 1,
+                port: 51234,
+                url: "http://127.0.0.1:51234/"));
+            var host = NewHost(gateway);
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+            host.BrowserOpener = _ => throw new Win32Exception(5, "拒绝访问。");
+
+            // zip_web 的真实形态 refresh=true：自动唤起必须在重载之后执行，
+            // 否则重载里的 ClearError 会把打开失败文案吞掉。
+            await host.ApplyActionResultAsync(
+                ActionResultWithUrl("http://127.0.0.1:51234/", refresh: true));
+
+            var error = Find<TextBlock>(host, "TextError");
+            Assert.Equal(Visibility.Visible, error.Visibility);
+            Assert.Contains("[OPEN_FAILED]", error.Text);
+            Assert.Contains("Win32Exception", error.Text);
+        });
+    }
+
+    [Fact]
+    public void Host_BrowserOpenFailure_AllowsRetryWithSameUrl()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            int calls = 0;
+            host.BrowserOpener = _ =>
+            {
+                calls++;
+                if (calls == 1)
+                {
+                    throw new InvalidOperationException("没有默认浏览器");
+                }
+
+                return true;
+            };
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+            Assert.Equal(Visibility.Visible, Find<TextBlock>(host, "TextError").Visibility);
+            Assert.Contains(nameof(InvalidOperationException), Find<TextBlock>(host, "TextError").Text);
+
+            // 同一 url 重试：失败不进入幂等黑名单，第二次允许再次唤起
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+            Assert.Equal(2, calls);
+            Assert.Equal(
+                Visibility.Collapsed,
+                Find<TextBlock>(host, "TextError").Visibility);
+        });
+    }
+
+    [Fact]
+    public void Host_ManualOpenButton_StillOpensAfterAutoOpen()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(ActionResult(
+                state: "idle", statusText: "未启动", actionCount: 1, itemCount: 1, port: 0));
+
+            var opened = new List<string>();
+            host.BrowserOpener = url =>
+            {
+                opened.Add(url);
+                return true;
+            };
+
+            const string url = "http://127.0.0.1:51234/";
+            await host.ApplyActionResultAsync(ActionResultWithUrl(url));
+            Find<Button>(host, "BtnActionOpenBrowser")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            // 自动打开一次 + 用户显式点击一次；备用按钮不被幂等逻辑吞掉
+            Assert.Equal(new[] { url, url }, opened);
+        });
+    }
+
     [Fact]
     public void Host_ActionFolderChoice_ShowsButtonAndReloadsWithFolder()
     {
@@ -1248,6 +1464,31 @@ public class PluginPageTests
         """;
 
         return Parse<PluginPageLoadResultDto>(json);
+    }
+
+    /// <summary>action 动作成功返回：与 zip_web 的 handle_start 同形（refresh + data.url）。</summary>
+    private static PluginPageActionResultDto ActionResultWithUrl(string url, bool refresh = false)
+    {
+        string urlJson = url.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        string json = $$"""
+        {
+          "ok": true,
+          "refresh": {{(refresh ? "true" : "false")}},
+          "message": "浏览服务已启动",
+          "data": {
+            "items": [{"name": "001.zip", "path": "C:/z/001.zip"}],
+            "state": "running",
+            "status_text": "正在浏览：{{urlJson}}",
+            "actions": [{"id": "stop", "title": "停止浏览服务"}],
+            "port": 51234,
+            "url": "{{urlJson}}",
+            "folder": "",
+            "allow_folder_choice": true
+          }
+        }
+        """;
+
+        return Parse<PluginPageActionResultDto>(json);
     }
 
     private static PluginPageLoadResultDto ListResultWithFilters(

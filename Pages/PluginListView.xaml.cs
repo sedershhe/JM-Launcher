@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using JML.Bridge;
 using JML.Bridge.Dto;
 using JML.Infrastructure;
@@ -33,11 +34,23 @@ public partial class PluginListView : UserControl
         string Status,
         string Description,
         bool Enabled,
-        IReadOnlyList<string> Dependents);
+        IReadOnlyList<string> Dependents,
+        string StatusCode,
+        string Reason);
 
     private readonly IPluginManageGateway _gateway;
     private bool _loadedOnce;
     private bool _busy;
+    private string? _pluginsDir;
+    private bool _manifestsLoaded;
+    private IReadOnlyDictionary<string, PluginManifestInfo> _manifests =
+        new Dictionary<string, PluginManifestInfo>(StringComparer.Ordinal);
+
+    /// <summary>详情窗工厂（测试注入假网关；生产用真实网关 + manifest 展示信息）。</summary>
+    internal Func<PluginRow, PluginDetailDialog> DetailDialogFactory { get; set; }
+
+    /// <summary>显示详情窗（生产是模态 ShowDialog；测试替换为不阻塞的假展示）。</summary>
+    internal Action<PluginDetailDialog> ShowDetailDialog { get; set; }
 
     public PluginListView()
         : this(PluginManageGateway.Instance)
@@ -49,6 +62,8 @@ public partial class PluginListView : UserControl
     {
         _gateway = gateway;
         InitializeComponent();
+        DetailDialogFactory = row => new PluginDetailDialog(_gateway, BuildDetailInfo(row));
+        ShowDetailDialog = dialog => dialog.ShowDialog();
         Loaded += async (_, _) =>
         {
             if (!_loadedOnce)
@@ -115,6 +130,8 @@ public partial class PluginListView : UserControl
             return;
         }
 
+        _pluginsDir = pluginsDir;
+        _manifestsLoaded = false;
         _busy = true;
         BtnRescan.IsEnabled = false;
         UpdateButtons();
@@ -172,7 +189,9 @@ public partial class PluginListView : UserControl
                     BuildStatusText(item),
                     item.Description,
                     item.Enabled,
-                    item.Dependents ?? []));
+                    item.Dependents ?? [],
+                    item.Status,
+                    item.Reason));
         }
 
         GridPlugins.ItemsSource = rows;
@@ -184,16 +203,77 @@ public partial class PluginListView : UserControl
     }
 
     /// <summary>状态列文案：已加载 / 已停用 / 加载失败（原因）。</summary>
-    internal static string BuildStatusText(PluginManagementItemDto item)
+    internal static string BuildStatusText(PluginManagementItemDto item) =>
+        PluginStatusDisplay.Format(item.Status, item.Reason);
+
+    // ------------------------------------------------------------------
+    // 双击行 → 插件详情窗（缺陷 2）
+    // ------------------------------------------------------------------
+
+    private void GridPlugins_MouseDoubleClick(object sender, MouseButtonEventArgs e) =>
+        OpenDetailForSelectedRow();
+
+    /// <summary>
+    /// 打开当前选中行的详情窗（模态）。窗口里的启停成功回调会刷新主列表。
+    /// 内部可见：STA 测试直接调用，验证“双击 → 打开”的完整映射。
+    /// </summary>
+    internal void OpenDetailForSelectedRow()
     {
-        return item.Status switch
+        if (SelectedRow is not { } row)
         {
-            PluginStatuses.Loaded => "已加载",
-            PluginStatuses.Disabled => "已停用",
-            _ => string.IsNullOrWhiteSpace(item.Reason)
-                ? "加载失败"
-                : $"加载失败（{LogSanitizer.Sanitize(item.Reason)}）",
+            return;
+        }
+
+        try
+        {
+            PluginDetailDialog dialog = DetailDialogFactory(row);
+            dialog.ChangedCallback = () => RefreshAsync(useBootstrap: false);
+            ShowDetailDialog(dialog);
+        }
+        catch (Exception ex)
+        {
+            // 详情窗构造/展示失败只写状态栏，不让双击把整个页面带崩。
+            TextStatus.Text = "打开插件详情失败：" + LogSanitizer.Sanitize(ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 行 → 详情窗展示模型：状态字段来自 Python，功能页 / 依赖 / 服务来自
+    /// 只读 manifest；插件 id 一律换成显示名便于阅读。
+    /// </summary>
+    internal PluginDetailInfo BuildDetailInfo(PluginRow row)
+    {
+        IReadOnlyDictionary<string, PluginManifestInfo> manifests = EnsureManifests();
+        manifests.TryGetValue(row.Id, out PluginManifestInfo? manifest);
+        var item = new PluginManagementItemDto
+        {
+            Id = row.Id,
+            Name = row.Name,
+            Version = row.Version,
+            Description = row.Description,
+            Enabled = row.Enabled,
+            Status = row.StatusCode,
+            Reason = row.Reason,
+            Dependents = row.Dependents.ToList(),
         };
+
+        return PluginDetailInfo.From(item, manifest, LookupName);
+    }
+
+    /// <summary>
+    /// 首次打开详情窗时读取一次 manifest 展示信息（几个很小的本地 JSON）。
+    /// 不做 Task.Run：列表刷新可能被同步等待（STA 测试与按钮链路），
+    /// 异步续体回到 UI 线程会死锁；这里直接在调用线程读，失败返回空表。
+    /// </summary>
+    private IReadOnlyDictionary<string, PluginManifestInfo> EnsureManifests()
+    {
+        if (!_manifestsLoaded)
+        {
+            _manifests = PluginManifestReader.ReadAll(_pluginsDir);
+            _manifestsLoaded = true;
+        }
+
+        return _manifests;
     }
 
     /// <summary>停用选中插件（按钮入口）。</summary>
