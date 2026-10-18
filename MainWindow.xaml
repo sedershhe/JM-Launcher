@@ -4,8 +4,8 @@
       窗口（A1）：WindowStyle=None、AllowsTransparency=True、Background=null、900×550、
                   Min 810×470、透明外边 10+8、圆角 6（Border.Clip）、自绘 8 块渐变阴影、
                   自绘 8 个缩放手柄（MyResizer 同参数）。
-      标题栏（A2）：高 48、纯色 ColorBrush4 #4890F5、文字 logo JML（17px 白）、
-                  四个 27 高胶囊导航、右侧 28×28 最小化/关闭（右边距 12/44）。
+      标题栏（A2）：高 48、按 PCL2 运行时主题色重算的横向三停靠渐变（见 PanTitle 就近注释）、
+                  文字 logo JML（17px 白）、四个 27 高胶囊导航、右侧 28×28 最小化/关闭（右边距 12/44）。
       内页态（A2）：返回箭头 28×28 + 页面名 15px，主导航隐藏。
     三层骨架保持：顶部标题栏 + 内容区；左侧二级目录仍由 PluginHubPage 自己承载。
     动画（2026-10-17 追加，参数来源 docs/20261017_PCL2动效规格_v1.0.md 第 1 节）：
@@ -149,11 +149,27 @@
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <!-- ===== 自定义标题栏（48 高，纯色 ColorObject4） ===== -->
+                <!-- ===== 自定义标题栏（48 高，PCL2 运行时主题蓝渐变） =====
+                     背景不用 ColorBrush4 #4890F5：那是 PCL2 XAML 里的静态默认值（FormMain.xaml:101-105），
+                     运行时会被 ThemeRefreshMain 用主题色重算覆盖（ModSecret.vb:114-120）：
+                       LinearGradientBrush StartPoint=(0,0) EndPoint=(1,0)，
+                       三停靠 Offset=0 / 0.5 / 1，色 = HSL2(hue, sat, 48 / 54 / 48)，默认 hue=210、sat=85%、
+                       ColorHueTopbarDelta=0、ColorLightAdjust=0。
+                     注意是 PCL2 自研的 MyColor.FromHSL2（带按色相的亮度校正，ModBase.vb:365-389），
+                     不是普通 HSL；默认主题下：
+                       HSL2(210,85,48)：校正后 L'≈41.6305 → #106AC4
+                       HSL2(210,85,54)：校正后 L'≈46.8343 → #1277DD
+                     普通 HSL(210,85,48/54) 会得到 #127AE2 / #268AED，那是旧近似值，已弃用。
+                     这两个色值不在 XAML 里写死：PanTitle.Background 由 MainWindow.xaml.cs 构造函数调用
+                     Infrastructure\PclThemeColor.CreateTitleBarBrush() 生成（FromHsl2 纯函数，
+                     公式与 ModBase.vb:365-389 的来源注释都在该文件里），回归测试锁定三个停靠色。
+                     不要改回 #4890F5：ColorBrush4 资源本身保持原值（外部库调色板与其它模板仍可能引用），
+                     但标题栏背景必须走这里的运行时渐变，不能再用静态浅蓝。
+                     Panel.ZIndex=10：标题栏整体压住内容区，配合下面 MainContentClip 的裁剪做双保险。 -->
                 <Grid x:Name="PanTitle"
                       Grid.Row="0"
                       Height="48"
-                      Background="{DynamicResource ColorBrush4}"
+                      Panel.ZIndex="10"
                       MouseLeftButtonDown="PanTitle_MouseLeftButtonDown">
 
                     <!-- 主模式：文字 logo + 居中一级导航（PCL2 三段式 1*/Auto/1*）
@@ -339,8 +355,15 @@
                     </Button>
                 </Grid>
 
-                <!-- ===== 内容区（各页面内容由 MainWindow 切换） ===== -->
-                <ContentControl x:Name="MainContent" Grid.Row="1" />
+                <!-- ===== 内容区（各页面内容由 MainWindow 切换） =====
+                     外层 Border 只做裁剪：页面入场动画把 MainContent 从 Y=-16 上滑落位，
+                     元素自身的 RenderTransform 会连它自己的裁剪区一起移动，所以裁剪必须放在
+                     不含动画的父级上（PCL2 也是靠内容容器 ScrollViewer 裁剪的）。
+                     x:Name="MainContent" 仍在里面的 ContentControl 上，MainWindow.xaml.cs 的
+                     PageTransition(MainContent) 与测试引用都不用改。 -->
+                <Border x:Name="MainContentClip" Grid.Row="1" ClipToBounds="True">
+                    <ContentControl x:Name="MainContent" />
+                </Border>
             </Grid>
         </Border>
     </Grid>

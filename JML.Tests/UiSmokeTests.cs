@@ -508,11 +508,12 @@ public class UiSmokeTests
                 Assert.Equal(6, clip.RadiusX);
                 Assert.Equal(6, clip.RadiusY);
 
-                // 标题栏：48 高、纯色 ColorBrush4（不是渐变）
+                // 标题栏：48 高；背景是 PCL2 运行时主题色渐变（ModSecret.vb:114-120），
+                // 不再是静态 ColorBrush4 #4890F5（该画刷保留给悬停/输入框）。
                 var titleBar = Find<Grid>(window, "PanTitle");
                 Assert.Equal(48, titleBar.Height);
-                var titleBrush = Assert.IsType<SolidColorBrush>(titleBar.Background);
-                Assert.Equal(ResourceColor("ColorBrush4"), titleBrush.Color);
+                var titleBrush = Assert.IsType<LinearGradientBrush>(titleBar.Background);
+                Assert.Equal(3, titleBrush.GradientStops.Count);
 
                 // 主模式 / 内页模式两套标题栏
                 Assert.Equal(Visibility.Visible, Find<Grid>(window, "MainHeader").Visibility);

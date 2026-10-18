@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using JML.Infrastructure;
 using JML.Navigation;
 using JML.Pages;
 
@@ -817,6 +818,11 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        // 标题栏运行时背景（PCL2 ModSecret.vb:114-120）：三停靠渐变，色值由
+        // Infrastructure\PclThemeColor.cs 的 FromHsl2（带色相亮度校正）算出，
+        // XAML 里不写死 #106AC4 / #1277DD，避免又退回普通 HSL 的近似色。
+        PanTitle.Background = PclThemeColor.CreateTitleBarBrush();
 
         _pageTransition = new PageTransition(MainContent);
         SizeChanged += (_, _) => UpdateFormClip();

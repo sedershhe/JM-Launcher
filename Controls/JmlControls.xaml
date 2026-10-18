@@ -204,9 +204,23 @@
                                    Fill="{DynamicResource ColorBrush2}"
                                    IsHitTestVisible="False"
                                    Visibility="Collapsed" />
-                        <ContentPresenter HorizontalAlignment="Left"
-                                          VerticalAlignment="Center"
-                                          Margin="10,0,8,0" />
+                        <!-- 文字必须用显式 TextBlock + TemplateBinding Foreground：
+                             外部库的隐式 TextBlock 样式（PlainToolkit
+                             Themes\Controls\TextBlock.xaml:11）把 Foreground 固定成 ColorBrush1 #343D4A，
+                             会压过 ContentPresenter 里的继承前景，导致选中态 ColorBrush3 #1370F3
+                             实际渲染不出来（与主按钮“文字与背景融合”同源）。
+                             侧栏项内容都是普通字符串，TemplateBinding Content 足够。 -->
+                        <TextBlock x:Name="LabText"
+                                   Text="{TemplateBinding Content}"
+                                   HorizontalAlignment="Left"
+                                   VerticalAlignment="Center"
+                                   Margin="10,0,8,0"
+                                   TextOptions.TextFormattingMode="Display"
+                                   SnapsToDevicePixels="True"
+                                   TextTrimming="CharacterEllipsis"
+                                   FontSize="{TemplateBinding FontSize}"
+                                   Foreground="{TemplateBinding Foreground}"
+                                   IsHitTestVisible="False" />
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -308,8 +322,12 @@
                                          DropShadowEffect ShadowDepth=0 BlurRadius=10 Opacity=0.2
          MyExtraTextButton.xaml.vb:140/143 悬停底 ColorBrush4（120ms）、常态回 ColorBrush3（150ms）
          MyExtraTextButton.xaml.vb:150-154 禁用 ColorBrushGray4
-         动效落点：悬停用一层 ColorBrush4 覆盖层做 120ms Opacity 淡入、150ms 淡出；
+         动效落点：悬停用一层底色覆盖层做 120ms Opacity 淡入、150ms 淡出；
          不动画 DropShadowEffect（规格 13.2-2 / 13.3 补充）。按下缩放本轮未做（任务只要求悬停颜色）。
+         对比度修正（2026-10-18，用户实测“部分按钮文字与背景融合”）：
+           PCL2 原值悬停色是 ColorBrush4 #4890F5，与 ColorBrush8 #EAF2FE 文字实测仅 2.83:1，
+           悬停时文字几乎糊进底色；改用同一套 PCL2 调色板里更深的 ColorBrush2 #0B5BCB（5.52:1），
+           文字仍 16px ColorBrush8、不加粗，主按钮常态仍严格是 ColorBrush3。
          使用：下载页「开始下载」、搜索页「搜索」、详情窗「下载本子」。 -->
     <Style x:Key="PrimaryButton" TargetType="Button">
         <Setter Property="OverridesDefaultStyle" Value="True" />
@@ -340,15 +358,28 @@
                                               Opacity="0.2" />
                         </Border.Effect>
                         <Grid>
-                            <!-- 悬停底色 ColorBrush4：120ms 淡入 / 150ms 淡出（不触发布局） -->
+                            <!-- 悬停底色 ColorBrush2：120ms 淡入 / 150ms 淡出（不触发布局）。
+                                 不用 PCL2 的 ColorBrush4，原因见上方“对比度修正”。 -->
                             <Border x:Name="HoverLayer"
-                                    Background="{DynamicResource ColorBrush4}"
+                                    Background="{DynamicResource ColorBrush2}"
                                     CornerRadius="20.8"
                                     Opacity="0"
                                     IsHitTestVisible="False" />
-                            <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center"
-                                              Margin="{TemplateBinding Padding}" />
+                            <!-- 文字用 TextBlock + TemplateBinding，而不是 ContentPresenter：
+                                 外部库的隐式 TextBlock 样式（PlainToolkit Themes\Controls\TextBlock.xaml:11）
+                                 把 Foreground 固定成 ColorBrush1 #343D4A，会压过 ContentPresenter 的继承值，
+                                 结果主按钮文字实际渲染成深灰压在蓝底上（实测 #343D4A on #1370F3 仅 2.43:1，
+                                 就是用户说的“文字与背景融合”）。主按钮内容全是普通字符串，用 TextBlock 即可。 -->
+                            <TextBlock x:Name="LabText"
+                                       Text="{TemplateBinding Content}"
+                                       TextOptions.TextFormattingMode="Display"
+                                       SnapsToDevicePixels="True"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Margin="{TemplateBinding Padding}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       FontSize="{TemplateBinding FontSize}"
+                                       IsHitTestVisible="False" />
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
@@ -372,6 +403,9 @@
                                 </BeginStoryboard>
                             </Trigger.ExitActions>
                         </Trigger>
+                        <!-- 禁用底仍按 PCL2 用 ColorBrushGray4（当前三个主按钮都没有禁用入口）。
+                             文字 ColorBrush8 在 Gray4 上只有 2.16:1，属“禁用态”且 WCAG 豁免，
+                             不额外改，避免偏离 PCL2 原值。 -->
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Root" Property="Background"
                                     Value="{DynamicResource ColorBrushGray4}" />
@@ -388,15 +422,132 @@
          MyButton.xaml:10 文字 13px，颜色跟随边框（模板里 Binding BorderBrush）
          MyButton.xaml.vb:160-170 禁用 = 边框 Gray4 + 底 Gray6
          悬停底 ColorBrush7 由基线 PlainButton 模板的 HoverBg 提供（ColorBrushButtonHoverBg=ColorBrush7）。
-         使用：浏览…、取消、上一页/下一页、插件页操作按钮、搜索行内「详情」「下载」。 -->
+         为什么在这里复制一份模板（不改外部 UI 库 PlainButton）：
+           基线模板的文字色 Foreground 绑定的是 PanFore.BorderBrush，禁用时只能跟着边框变 Gray4，
+           实测 Gray4 #A6A6A6 文字压在 Gray6 #EBEBEB 底上只有 2.04:1，页面上看着就是“糊成一片”。
+           复制后文字改用 TemplateBinding Foreground（常态 ColorBrush1 #343D4A，10.3:1），
+           禁用态在模板触发器里单独把 Foreground 设成 ColorBrushGray3 #8C8C8C（实测 2.82:1，
+           比 PCL2 原值 2.04:1 明显提升；仍属禁用态，WCAG 对禁用控件豁免对比度）。
+         使用：浏览…、取消、上一页/下一页、插件页操作按钮、搜索行内「详情」「下载」、设置页按钮。 -->
     <Style x:Key="SecondaryButton" TargetType="Button" BasedOn="{StaticResource PlainButton}">
         <Setter Property="Height" Value="35" />
         <Setter Property="MinWidth" Value="76" />
         <Setter Property="Padding" Value="14,0" />
         <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource ColorBrush1}" />
         <Setter Property="Background" Value="{DynamicResource ColorBrushHalfWhite}" />
         <Setter Property="BorderBrush" Value="{DynamicResource ColorBrush1}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="PanBack"
+                            Background="{DynamicResource ColorBrushSemiTransparent}">
+                        <Grid>
+                            <Border x:Name="HoverBg"
+                                    Background="{DynamicResource ColorBrushButtonHoverBg}"
+                                    CornerRadius="3"
+                                    Opacity="0"
+                                    IsHitTestVisible="False" />
+                            <Border x:Name="PanFore"
+                                    CornerRadius="3"
+                                    BorderThickness="1"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    Background="{TemplateBinding Background}"
+                                    Padding="{TemplateBinding Padding}"
+                                    RenderTransformOrigin="0.5,0.5">
+                                <Border.RenderTransform>
+                                    <ScaleTransform />
+                                </Border.RenderTransform>
+                                <TextBlock x:Name="LabText"
+                                           Text="{TemplateBinding Content}"
+                                           TextOptions.TextFormattingMode="Display"
+                                           SnapsToDevicePixels="True"
+                                           TextTrimming="None"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           RenderTransformOrigin="0.5,0.5"
+                                           Foreground="{TemplateBinding Foreground}"
+                                           FontSize="{TemplateBinding FontSize}"
+                                           IsHitTestVisible="False">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform />
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                            </Border>
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="HoverBg"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1" Duration="0:0:0.1" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="HoverBg"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="0" Duration="0:0:0.12" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="PanFore"
+                                                         Storyboard.TargetProperty="(Border.RenderTransform).(ScaleTransform.ScaleX)"
+                                                         To="0.955" Duration="0:0:0.08" />
+                                        <DoubleAnimation Storyboard.TargetName="PanFore"
+                                                         Storyboard.TargetProperty="(Border.RenderTransform).(ScaleTransform.ScaleY)"
+                                                         To="0.955" Duration="0:0:0.08" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="PanFore"
+                                                         Storyboard.TargetProperty="(Border.RenderTransform).(ScaleTransform.ScaleX)"
+                                                         To="1" Duration="0:0:0.3" />
+                                        <DoubleAnimation Storyboard.TargetName="PanFore"
+                                                         Storyboard.TargetProperty="(Border.RenderTransform).(ScaleTransform.ScaleY)"
+                                                         To="1" Duration="0:0:0.3" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                        <!-- 禁用：底 Gray6、边框 Gray4（PCL2 原值），文字 Gray3（对比度修正，见上）。
+                             不用 FontWeight 加粗来补对比度（PCL2 按钮不加粗）。 -->
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="PanFore" Property="BorderBrush"
+                                    Value="{DynamicResource ColorBrushGray4}" />
+                            <Setter TargetName="PanFore" Property="Background"
+                                    Value="{DynamicResource ColorBrushGray6}" />
+                            <Setter Property="Foreground"
+                                    Value="{DynamicResource ColorBrushGray3}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
+
+    <!-- ========== 兜底：没写 Style 的 Button 统一按 35 高次按钮 ==========
+         PythonSetupPage 的「重新检测」「进入主界面」原来没写 Style，落到外部库的隐式
+         PlainButton：透明底、Padding=14,8、高度随内容，与其它页的次按钮不一致（用户实测“字号不统一”）。
+         任务约定不改 Pages\ 下的页面文件，所以在这里用隐式样式统一。
+         本字典在 App.xaml 的 MergedDictionaries 中排在 PlainToolkit Generic.xaml 之后，
+         隐式样式查找后进先出 → 这里的定义会盖过库里的 PlainButton 隐式样式。
+         其余按钮都显式指定了 PrimaryButton / SecondaryButton / TitleIconButton，不受影响。 -->
+    <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}" />
+
 
     <!-- ========== 插件页 DataGrid（PCL2 观感：无粗边框、36 行高、浅色表头） ==========
          PCL2 没有 DataGrid；行高取左栏列表项 36（PageDownloadLeft.xaml:8），
