@@ -713,7 +713,7 @@ def _image_progress(logs: list[dict]) -> list[tuple[int, int | None]]:
 
 
 def test_progress_logs_cover_every_chapter_and_image(tmp_path):
-    """3 章共 6 张：章开始行 + 1/6…6/6 全序列 + 结尾汇总。"""
+    """3 章共 6 张：三条章开始行都在 + 1/6…6/6 全序列 + 结尾汇总。"""
     logs: list[dict] = []
     events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
     source = FakeDownloadSource(
@@ -726,7 +726,23 @@ def test_progress_logs_cover_every_chapter_and_image(tmp_path):
 
     assert result["success"] == 1
     messages = [entry["message"] for entry in logs]
-    assert "开始下载章节：第 1/3 章（第1章）" in messages
+    # 章节开始行豁免 50ms 节流：每章都必须出现
+    chapter_lines = [
+        message for message in messages if message.startswith("开始下载章节：")
+    ]
+    assert chapter_lines == [
+        "开始下载章节：第 1/3 章（第1章）",
+        "开始下载章节：第 2/3 章（第2章）",
+        "开始下载章节：第 3/3 章（第3章）",
+    ], messages
+    # 章开始行必须落在该章第一张图片之前
+    first_images = [f"图片下载完成：{index}/6" for index in (1, 3, 5)]
+    for chapter_line, first_image in zip(chapter_lines, first_images):
+        assert messages.index(chapter_line) < next(
+            index
+            for index, message in enumerate(messages)
+            if message.startswith(first_image)
+        )
     assert _image_progress(logs) == [
         (1, 6),
         (2, 6),
@@ -780,7 +796,7 @@ def test_progress_without_page_count_never_writes_slash_zero(tmp_path):
 
 
 def test_progress_lines_are_throttled_and_last_image_always_emitted(tmp_path):
-    """相邻进度行 ≥50ms；被节流的图只更新计数；最后一张必发。"""
+    """相邻图片进度行 ≥50ms；被节流的图只更新计数；最后一张必发。"""
     logs: list[dict] = []
     stamps: list[float] = []
 
@@ -838,6 +854,30 @@ def test_book_progress_throttles_middle_images_and_forces_last(monkeypatch):
         "图片下载完成：10/10",
     ]
     assert progress.emitted == 3
+
+
+def test_book_progress_chapter_lines_bypass_throttle_and_cap(monkeypatch):
+    """章节开始行豁免 50ms 与 120 条上限：同一毫秒连发也一条不少。"""
+    clock = [1000.0]
+    monkeypatch.setattr(downloader.time, "monotonic", lambda: clock[0])
+    lines: list[str] = []
+    progress = downloader._BookProgress(lines.append, 40, 30)
+    # 上限压到 2，用来证明章节行不占图片行额度（步长在构造时已算好）
+    monkeypatch.setattr(downloader, "PROGRESS_MAX_IMAGE_LINES", 2)
+
+    for index in range(1, 31):  # 30 章连续开始，同一毫秒
+        assert progress.chapter_started(index, f"第{index}章") is True
+
+    assert len(lines) == 30
+    assert lines[0] == "开始下载章节：第 1/30 章（第1章）"
+    assert lines[-1] == "开始下载章节：第 30/30 章（第30章）"
+    assert progress.emitted == 0  # 章节行不计入图片进度行数
+
+    # 章节行会刷新节流时间戳：紧随其后的图片行仍在 50ms 内，被节流
+    assert progress.image_done(30) is False
+    clock[0] += 0.06  # 越过 50ms（避开浮点边界）
+    assert progress.image_done(30) is True
+    assert progress.emitted == 1
 
 
 def test_progress_capped_for_large_book(monkeypatch, tmp_path):

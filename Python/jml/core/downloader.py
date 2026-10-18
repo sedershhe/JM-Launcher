@@ -21,8 +21,9 @@
   ``download.log`` 统一走全局事件总线，C# sink 按 batch_id 分窗；
 - 图片级进度：每章开始、每张图片完成、单本成功汇总各发一条 info 级
   ``download.log``（`开始下载章节：第 i/n 章` / `图片下载完成：done/total`）；
-  相邻进度行至少间隔 50ms、最后一张必发、单本图片进度行上限 120 条，
-  格式与节流规则见桥接契约 §5.3。取消/失败后不再刷新进度；
+  图片进度行至少间隔 50ms、最后一张必发、单本图片进度行上限 120 条，
+  章节开始行**豁免**节流与上限（每章必出现）；格式与节流规则见桥接契约 §5.3。
+  取消/失败后不再刷新进度；
 - 批次状态先提交（status/result）再发 batch_finished，事件处理器内查询
   立即可见 finished；快照/查询结果一律是副本。
 
@@ -76,10 +77,10 @@ LOG_INFO = "info"
 LOG_WARN = "warn"
 LOG_ERROR = "error"
 
-#: 图片级进度：相邻两条进度日志的最小间隔（秒，``time.monotonic`` 判定）
+#: 图片级进度：相邻两条图片进度日志的最小间隔（秒，``time.monotonic`` 判定）
 PROGRESS_MIN_INTERVAL_SECONDS = 0.05
 
-#: 图片级进度：单本"图片下载完成"进度行上限（章节开始行不计入）
+#: 图片级进度：单本"图片下载完成"进度行上限（章节开始行不计入、不参与上限）
 PROGRESS_MAX_IMAGE_LINES = 120
 
 #: 图片级进度：总页数达到该值后按 ``total // 100`` 取步长（大本子少刷一点）
@@ -426,6 +427,10 @@ class _BookProgress:
 
     生命周期只在一个下载线程内（``_run_one_book`` 的局部变量），不加锁。
     ``emit`` 是 ``message -> None`` 的回调（组装成 download.log 事件）。
+
+    节流分工（契约 §5.3）：**章节开始行豁免** 50ms 与 120 条上限（章节数有限，
+    每章必出现），但仍刷新节流时间戳；**图片进度行**受 50ms、步长与 120 条
+    上限约束，最后一张强制补发。
     """
 
     def __init__(self, emit, total: int, chapter_count: int) -> None:
@@ -466,12 +471,15 @@ class _BookProgress:
         return True
 
     def chapter_started(self, index: int, title="") -> bool:
-        """每章开始一行；被节流时不补发（后续图片进度行带章节号）。"""
+        """每章开始一行：**豁免** 50ms 节流与 120 条上限（章节数有限，每章必发）。
+
+        仍然刷新节流时间戳：紧随其后的图片进度行从这一行起算 50ms。
+        """
         message = f"开始下载章节：第 {index}/{self.chapter_count} 章"
         label = _progress_title(title)
         if label:
             message += f"（{label}）"
-        return self._emit_line(message)
+        return self._emit_line(message, force=True)
 
     def image_done(self, chapter_index: int) -> bool:
         """一张图片下载完成；返回是否真的发了一条日志。"""
