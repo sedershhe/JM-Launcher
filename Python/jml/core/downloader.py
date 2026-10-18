@@ -19,6 +19,10 @@
 - 事件：item_started / item_finished / log / batch_finished，payload 字段
   与 ``protocol.EVENT_PAYLOAD_SCHEMAS`` 一致（额外带 batch_id）；
   ``download.log`` 统一走全局事件总线，C# sink 按 batch_id 分窗；
+- 图片级进度：每章开始、每张图片完成、单本成功汇总各发一条 info 级
+  ``download.log``（`开始下载章节：第 i/n 章` / `图片下载完成：done/total`）；
+  相邻进度行至少间隔 50ms、最后一张必发、单本图片进度行上限 120 条，
+  格式与节流规则见桥接契约 §5.3。取消/失败后不再刷新进度；
 - 批次状态先提交（status/result）再发 batch_finished，事件处理器内查询
   立即可见 finished；快照/查询结果一律是副本。
 
@@ -71,6 +75,21 @@ STATUS_FINISHED = "finished"
 LOG_INFO = "info"
 LOG_WARN = "warn"
 LOG_ERROR = "error"
+
+#: 图片级进度：相邻两条进度日志的最小间隔（秒，``time.monotonic`` 判定）
+PROGRESS_MIN_INTERVAL_SECONDS = 0.05
+
+#: 图片级进度：单本"图片下载完成"进度行上限（章节开始行不计入）
+PROGRESS_MAX_IMAGE_LINES = 120
+
+#: 图片级进度：总页数达到该值后按 ``total // 100`` 取步长（大本子少刷一点）
+PROGRESS_LARGE_BOOK_TOTAL = 200
+
+#: 图片级进度：超出上限后按总页数的 5% 一条
+PROGRESS_PERCENT_STEP = 5
+
+#: 图片级进度：章节标题最多保留字符数（超出截断并补省略号）
+PROGRESS_TITLE_MAX_CHARS = 20
 
 #: 批次历史保留条数（按 finished_at 保留最近 N 个）
 MAX_BATCH_HISTORY = 50
@@ -357,6 +376,120 @@ def _emit_log(
 
 
 # ---------------------------------------------------------------------------
+# 图片级进度（download.log 的 info 行；格式/节流/上限见契约 §5.3）
+# ---------------------------------------------------------------------------
+
+
+def _positive_int(value, default: int = 0) -> int:
+    """把数据源给的页数收成非负 int；非法/缺失/非正数一律返回 ``default``。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _progress_title(title) -> str:
+    """章节标题脱敏（凭据打码）并截断，避免长标题把日志行撑爆。"""
+    text = sanitize_text(title).strip()
+    if not text:
+        return ""
+    if len(text) > PROGRESS_TITLE_MAX_CHARS:
+        text = text[: PROGRESS_TITLE_MAX_CHARS - 1] + "…"
+    return text
+
+
+def _progress_step(total: int) -> int:
+    """按总页数算出图片进度行的步长（最后一张由调用方补发，不靠步长命中）。
+
+    规则（契约 §5.3）：
+
+    - 总页数未知（0）或小于 200：每张一条（步长 1）；
+    - 总页数 ≥ 200：步长 ``max(1, total // 100)``，约为 100 条；
+    - 若按上面步长算出的行数仍超过 120 条（例如 121~241 页），
+      退回"每 5% 一条"，保证单本图片进度行有界。
+    """
+    if total <= 0:
+        return 1
+    step = 1
+    if total >= PROGRESS_LARGE_BOOK_TOTAL:
+        step = max(1, total // 100)
+    estimated_lines = -(-total // step)  # ceil(total / step)
+    if estimated_lines > PROGRESS_MAX_IMAGE_LINES:
+        percent_step = -(-total * PROGRESS_PERCENT_STEP // 100)
+        step = max(step, percent_step)
+    return max(1, step)
+
+
+class _BookProgress:
+    """单本图片级进度：负责行格式、50ms 节流、步长与条数上限。
+
+    生命周期只在一个下载线程内（``_run_one_book`` 的局部变量），不加锁。
+    ``emit`` 是 ``message -> None`` 的回调（组装成 download.log 事件）。
+    """
+
+    def __init__(self, emit, total: int, chapter_count: int) -> None:
+        self._emit = emit
+        #: 真实总页数；0 表示数据源拿不到（进度行不写 ``/0``）
+        self.total = total if total > 0 else 0
+        self.chapter_count = max(1, int(chapter_count or 0))
+        #: 已完成图片数（被节流的图片照样累加）
+        self.done = 0
+        #: 已发出的"图片下载完成"进度行数
+        self.emitted = 0
+        self._step = _progress_step(self.total)
+        self._last_at = float("-inf")
+
+    # -- 行构造 -------------------------------------------------------------
+
+    def _image_message(self, chapter_index: int) -> str:
+        if self.total > 0:
+            text = f"图片下载完成：{self.done}/{self.total}"
+        else:
+            text = f"图片下载完成：{self.done}"
+        if self.chapter_count > 1:
+            text += f"（第 {chapter_index}/{self.chapter_count} 章）"
+        return text
+
+    def summary(self, elapsed: float) -> str:
+        """单本成功收口行（不算进度行，不受节流/上限约束）。"""
+        return f"图片下载完成：共 {self.done} 张，用时 {elapsed:.1f}s"
+
+    # -- 发送 ---------------------------------------------------------------
+
+    def _emit_line(self, message: str, force: bool = False) -> bool:
+        now = time.monotonic()
+        if not force and now - self._last_at < PROGRESS_MIN_INTERVAL_SECONDS:
+            return False
+        self._last_at = now
+        self._emit(message)
+        return True
+
+    def chapter_started(self, index: int, title="") -> bool:
+        """每章开始一行；被节流时不补发（后续图片进度行带章节号）。"""
+        message = f"开始下载章节：第 {index}/{self.chapter_count} 章"
+        label = _progress_title(title)
+        if label:
+            message += f"（{label}）"
+        return self._emit_line(message)
+
+    def image_done(self, chapter_index: int) -> bool:
+        """一张图片下载完成；返回是否真的发了一条日志。"""
+        self.done += 1
+        final = self.total > 0 and self.done >= self.total
+        if not final:
+            if self._step > 1 and self.done % self._step != 0:
+                return False
+            # 预留一条给"最后一张"补发（总页数未知时也保证不超上限）
+            if self.emitted >= PROGRESS_MAX_IMAGE_LINES - 1:
+                return False
+        if not self._emit_line(self._image_message(chapter_index), force=final):
+            return False
+        self.emitted += 1
+        return True
+
+
+# ---------------------------------------------------------------------------
 # 单本下载
 # ---------------------------------------------------------------------------
 
@@ -479,10 +612,22 @@ def _run_one_book(
         )
 
         temp_dir = _create_work_dir(target_dir, book_id, work_dir, batch_id)
+        # 图片级进度：总页数取数据源给的 album["page_count"]（可能为 0），
+        # 0 时进度行只写已完成张数，绝不出现 ``/0``。
+        progress = _BookProgress(
+            lambda message: _emit_log(batch_id, LOG_INFO, message),
+            _positive_int(album.get("page_count")),
+            len(chapters),
+        )
+        image_started_at = time.monotonic()
         image_paths: list[str] = []
         for chapter_index, chapter in enumerate(chapters, start=1):
             # 检查点 2：每章开始
             _raise_if_cancelled(cancel_event)
+            progress.chapter_started(
+                chapter_index,
+                chapter.get("title", "") if isinstance(chapter, dict) else "",
+            )
             chapter_dir = os.path.join(temp_dir, f"chapter_{chapter_index:03d}")
             image_iter = iter(source.iter_chapter_images(book_id, chapter, chapter_dir))
             while True:
@@ -493,6 +638,9 @@ def _run_one_book(
                 except StopIteration:
                     break
                 image_paths.append(image_path)
+                # 取消后不再刷进度：只保留既有的"已取消/失败"日志
+                if not cancel_event.is_set():
+                    progress.image_done(chapter_index)
 
         _raise_if_cancelled(cancel_event)
         if not image_paths:
@@ -531,6 +679,12 @@ def _run_one_book(
             _log_artifact_write_failure(batch_id, exc)
             raise
 
+        # 单本成功收口：额外一条"共 N 张"（失败/取消走到下面的分支，不刷汇总）
+        _emit_log(
+            batch_id,
+            LOG_INFO,
+            progress.summary(time.monotonic() - image_started_at),
+        )
         _emit_log(batch_id, LOG_INFO, f"已保存: {zip_path}（{entry_count} 页）")
         return _finished_ok(zip_path)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 import threading
 import time
 import zipfile
@@ -689,6 +690,250 @@ def test_jmcomic_warning_log_carries_current_batch_id(tmp_path):
     assert all(item["batch_id"] == "ctx-batch" for item in matched)
     # 下载线程退出后上下文必须清空
     assert jm_source.current_batch_id() == ""
+
+
+# ---------------------------------------------------------------------------
+# 图片级进度日志（download.log，level=info；格式/节流/上限见契约 §5.3）
+# ---------------------------------------------------------------------------
+
+_IMAGE_PROGRESS_RE = re.compile(r"^图片下载完成：(\d+)(?:/(\d+))?")
+_IMAGE_SUMMARY_PREFIX = "图片下载完成：共 "
+
+
+def _image_progress(logs: list[dict]) -> list[tuple[int, int | None]]:
+    """从 download.log 事件里抽出图片进度行 ``(done, total|None)``（按顺序）。"""
+    pairs: list[tuple[int, int | None]] = []
+    for entry in logs:
+        match = _IMAGE_PROGRESS_RE.match(entry["message"])
+        if match is None:
+            continue
+        total = match.group(2)
+        pairs.append((int(match.group(1)), None if total is None else int(total)))
+    return pairs
+
+
+def test_progress_logs_cover_every_chapter_and_image(tmp_path):
+    """3 章共 6 张：章开始行 + 1/6…6/6 全序列 + 结尾汇总。"""
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    source = FakeDownloadSource(
+        {"1": "进度书"}, chapters=3, images_per_chapter=2, sleep=0.08
+    )
+
+    result = downloader.run_batch(
+        ["1"], str(tmp_path), batch_id="progress", source=source
+    )
+
+    assert result["success"] == 1
+    messages = [entry["message"] for entry in logs]
+    assert "开始下载章节：第 1/3 章（第1章）" in messages
+    assert _image_progress(logs) == [
+        (1, 6),
+        (2, 6),
+        (3, 6),
+        (4, 6),
+        (5, 6),
+        (6, 6),
+    ], messages
+    # 章节号随图片行一起给出（多章节本子才附）
+    assert "图片下载完成：3/6（第 2/3 章）" in messages
+    assert "图片下载完成：6/6（第 3/3 章）" in messages
+    # 单本成功收口：额外一条"共 N 张"
+    assert any(
+        message.startswith(_IMAGE_SUMMARY_PREFIX) and message.endswith("s")
+        for message in messages
+    ), messages
+    summary = next(
+        message for message in messages if message.startswith(_IMAGE_SUMMARY_PREFIX)
+    )
+    assert "共 6 张，用时 " in summary
+    # 进度行一律 info 级，且带当前 batch_id
+    progress_entries = [
+        entry
+        for entry in logs
+        if entry["message"].startswith(("图片下载完成：", "开始下载章节："))
+    ]
+    assert progress_entries
+    assert all(entry["level"] == "info" for entry in progress_entries)
+    assert all(entry["batch_id"] == "progress" for entry in progress_entries)
+
+
+def test_progress_without_page_count_never_writes_slash_zero(tmp_path):
+    """page_count=0：进度行只写已完成张数，结尾仍能报总张数。"""
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    source = FakeDownloadSource(
+        {"1": "零页书"}, chapters=1, images_per_chapter=3, sleep=0.08
+    )
+    album = source.get_album("1")
+    album["page_count"] = 0
+    source.album = album
+
+    result = downloader.run_batch(["1"], str(tmp_path), source=source)
+
+    assert result["success"] == 1
+    messages = [entry["message"] for entry in logs]
+    assert not any("/0" in message for message in messages), messages
+    assert _image_progress(logs) == [(1, None), (2, None), (3, None)]
+    assert any(message.startswith("图片下载完成：共 3 张，用时 ") for message in messages)
+    assert any("开始下载章节：第 1/1 章" in message for message in messages)
+
+
+def test_progress_lines_are_throttled_and_last_image_always_emitted(tmp_path):
+    """相邻进度行 ≥50ms；被节流的图只更新计数；最后一张必发。"""
+    logs: list[dict] = []
+    stamps: list[float] = []
+
+    def on_log(payload: dict) -> None:
+        logs.append(payload)
+        match = _IMAGE_PROGRESS_RE.match(payload["message"])
+        if match is not None:
+            stamps.append(time.monotonic())
+
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, on_log)
+    # 每张 20ms：快于 50ms 下限，中间必然有图被节流
+    source = FakeDownloadSource(
+        {"1": "节流书"}, chapters=1, images_per_chapter=10, sleep=0.02
+    )
+
+    result = downloader.run_batch(["1"], str(tmp_path), source=source)
+
+    assert result["success"] == 1
+    pairs = _image_progress(logs)
+    assert 2 <= len(pairs) <= 10, pairs
+    # 最后一张必须发（补发），计数等于真实总数
+    assert pairs[-1] == (10, 10)
+    assert source.downloaded == 10
+    # 除"最后一张补发"这一对外，相邻进度行间隔都不小于 50ms
+    gaps = [later - earlier for earlier, later in zip(stamps[:-2], stamps[1:-1])]
+    assert gaps, stamps
+    assert all(
+        gap >= downloader.PROGRESS_MIN_INTERVAL_SECONDS - 0.005 for gap in gaps
+    ), gaps
+
+
+def test_book_progress_throttles_middle_images_and_forces_last(monkeypatch):
+    """用假时钟精确验证：中间图只累加计数，最后一张即使未到 50ms 也补发。"""
+    clock = [1000.0]
+    monkeypatch.setattr(downloader.time, "monotonic", lambda: clock[0])
+    lines: list[str] = []
+    progress = downloader._BookProgress(lines.append, 10, 1)
+
+    progress.image_done(1)  # 首张：发
+    for _ in range(3):  # 第 2~4 张：都在 50ms 内，只累加
+        clock[0] += 0.01
+        progress.image_done(1)
+    clock[0] += 0.04  # 第 5 张：距上一条 0.07s，发
+    progress.image_done(1)
+    for _ in range(4):  # 第 6~9 张：又在 50ms 内
+        clock[0] += 0.01
+        progress.image_done(1)
+    # 第 10 张（最后一张）：距上一条 0.04s（<50ms），仍必须补发
+    progress.image_done(1)
+
+    assert progress.done == 10
+    assert lines == [
+        "图片下载完成：1/10",
+        "图片下载完成：5/10",
+        "图片下载完成：10/10",
+    ]
+    assert progress.emitted == 3
+
+
+def test_progress_capped_for_large_book(monkeypatch, tmp_path):
+    """200 张的大本子：进度行 ≤120，最后一张计数仍为 200。"""
+    monkeypatch.setattr(downloader, "PROGRESS_MIN_INTERVAL_SECONDS", 0.0)
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    source = FakeDownloadSource(
+        {"1": "大书"}, chapters=1, images_per_chapter=200
+    )
+
+    result = downloader.run_batch(["1"], str(tmp_path), source=source)
+
+    assert result["success"] == 1
+    pairs = _image_progress(logs)
+    assert len(pairs) <= downloader.PROGRESS_MAX_IMAGE_LINES, len(pairs)
+    assert pairs[-1] == (200, 200)
+    # total≥200 → 步长 total//100=2（第 1 张不发，从第 2 张开始）
+    assert pairs[0][0] == 2
+    assert all(total == 200 for _, total in pairs)
+
+
+@pytest.mark.parametrize("total", [1, 120, 121, 199, 200, 241, 5000])
+def test_progress_step_keeps_line_count_bounded(total):
+    step = downloader._progress_step(total)
+    assert step >= 1
+    assert -(-total // step) <= downloader.PROGRESS_MAX_IMAGE_LINES
+
+
+def test_progress_step_unknown_total_is_one():
+    assert downloader._progress_step(0) == 1
+    assert downloader._progress_step(-5) == 1
+
+
+def test_progress_title_is_sanitized_and_truncated():
+    masked = downloader._progress_title("password=SECRET-TITLE")
+    assert masked and "SECRET-TITLE" not in masked
+
+    long_title = "长" * (downloader.PROGRESS_TITLE_MAX_CHARS + 10)
+    shortened = downloader._progress_title(long_title)
+    assert len(shortened) == downloader.PROGRESS_TITLE_MAX_CHARS
+    assert shortened.endswith("…")
+    assert downloader._progress_title("") == ""
+    assert downloader._progress_title(None) == ""
+
+
+def test_cancel_stops_new_progress_lines(tmp_path):
+    """取消后不再出现新的进度行，也不发成功汇总。"""
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    cancel_event = threading.Event()
+    source = FakeDownloadSource(
+        {"1": "取消书"}, chapters=1, images_per_chapter=60, sleep=0.05
+    )
+    holder: dict = {}
+
+    def runner() -> None:
+        holder["result"] = downloader.run_batch(
+            ["1"], str(tmp_path), cancel_event=cancel_event, source=source
+        )
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    assert _wait_until(lambda: len(_image_progress(logs)) >= 1, timeout=5)
+
+    cancel_event.set()
+    thread.join(10)
+
+    assert not thread.is_alive()
+    result = holder["result"]
+    assert result["cancelled"] == 1
+    assert result["success"] == 0
+
+    messages = [entry["message"] for entry in logs]
+    cancel_index = next(
+        index for index, message in enumerate(messages) if message.endswith("已取消")
+    )
+    after_cancel = messages[cancel_index + 1 :]
+    assert not any(_IMAGE_PROGRESS_RE.match(message) for message in after_cancel), (
+        after_cancel
+    )
+    assert not any(message.startswith(_IMAGE_SUMMARY_PREFIX) for message in messages)
+
+
+def test_failed_book_does_not_emit_success_summary(tmp_path):
+    """失败的本子不发"共 N 张"成功汇总（进度行可以有，收口只走 error 日志）。"""
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    source = FakeDownloadSource({"1": "坏图"}, invalid_image_books={"1"})
+
+    result = downloader.run_batch(["1"], str(tmp_path), source=source)
+
+    assert result["failed"] == 1
+    messages = [entry["message"] for entry in logs]
+    assert not any(message.startswith(_IMAGE_SUMMARY_PREFIX) for message in messages)
+    assert any(entry["level"] == "error" for entry in logs)
 
 
 def test_batch_status_committed_before_batch_finished_event(tmp_path):
