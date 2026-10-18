@@ -18,7 +18,12 @@ import pytest
 from PIL import Image
 
 from jml.core import archive, downloader, jm_source
-from jml.core.errors import ERROR_IMAGE_INVALID, BatchNotFoundError, InvalidArgumentError
+from jml.core.errors import (
+    ERROR_IMAGE_INVALID,
+    ERROR_PERMISSION_DENIED,
+    BatchNotFoundError,
+    InvalidArgumentError,
+)
 from jml.core.protocol import (
     EVENT_DOWNLOAD_BATCH_FINISHED,
     EVENT_DOWNLOAD_ITEM_FINISHED,
@@ -263,6 +268,131 @@ def test_stale_work_dirs_are_cleaned(tmp_path):
 
     assert not stale.exists()
     assert fresh.exists()
+
+
+# ---------------------------------------------------------------------------
+# 临时目录降级（首选 %LOCALAPPDATA%\JML\tmp 不可写）
+# ---------------------------------------------------------------------------
+
+
+def _deny_makedirs(monkeypatch, denied_prefix):
+    """把 ``os.makedirs`` 换成"指定前缀下拒绝创建"的假实现（其余照常）。"""
+    real_makedirs = os.makedirs
+    denied = os.path.abspath(str(denied_prefix))
+
+    def fake_makedirs(path, *args, **kwargs):
+        target = os.path.abspath(str(path))
+        if target == denied or target.startswith(denied + os.sep):
+            raise PermissionError(13, "拒绝访问（测试模拟）", str(path))
+        return real_makedirs(path, *args, **kwargs)
+
+    monkeypatch.setattr(downloader.os, "makedirs", fake_makedirs)
+    return fake_makedirs
+
+
+def _deny_all_new_dirs(monkeypatch):
+    """把所有"新建目录"都拒绝，已存在的目录照常返回（模拟两处都不可写）。"""
+    real_isdir = os.path.isdir
+
+    def fake_makedirs(path, *args, **kwargs):
+        if real_isdir(str(path)):
+            return None
+        raise PermissionError(13, "拒绝访问（测试模拟）", str(path))
+
+    monkeypatch.setattr(downloader.os, "makedirs", fake_makedirs)
+
+
+def test_work_dir_denied_falls_back_to_target_with_warn_log(
+    monkeypatch, tmp_path
+):
+    """首选 work_dir 不可写 → 降级到下载目录：下载成功、有 warn 日志、无残留。"""
+    target = tmp_path / "out"
+    target.mkdir()
+    denied_work = tmp_path / "denied-work"
+
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    _deny_makedirs(monkeypatch, denied_work)
+
+    source = FakeDownloadSource({"1": "降级书"}, record_dest_dirs=True)
+    result = downloader.run_batch(
+        ["1"], str(target), source=source, work_dir=str(denied_work)
+    )
+
+    assert result["success"] == 1
+    item = result["items"][0]
+    assert item["ok"] is True
+    assert os.path.isfile(item["zip_path"])
+    assert item["zip_path"].startswith(str(target))
+
+    # 临时目录必须落在下载目录内，而不是不可写的首选目录
+    assert source.dest_dirs
+    assert all(path.startswith(str(target)) for path in source.dest_dirs)
+    assert not denied_work.exists()
+
+    # 降级必须发一条 warn 日志（脱敏、说明原因）
+    warns = [entry for entry in logs if entry["level"] == "warn"]
+    fallback_logs = [
+        entry
+        for entry in warns
+        if "临时目录不可用，已降级到下载目录" in entry["message"]
+    ]
+    assert fallback_logs, f"应收到降级 warn 日志，实际 warn: {warns}"
+    assert str(target) in fallback_logs[0]["message"]
+    assert "PermissionError" in fallback_logs[0]["message"]
+    assert fallback_logs[0]["batch_id"] == result["batch_id"]
+    assert all("拒绝访问（测试模拟）" not in entry["message"] for entry in fallback_logs)
+
+    # 批次结束后降级目录也无残留
+    assert list(target.glob(".jml-tmp-*")) == []
+
+
+def test_both_temp_dirs_denied_fails_with_permission_denied(
+    monkeypatch, tmp_path
+):
+    """首选与下载目录都写不进去 → 该本失败，PERMISSION_DENIED，消息带两处路径。"""
+    target = tmp_path / "out"
+    target.mkdir()
+    denied_work = tmp_path / "denied-work"
+    _deny_all_new_dirs(monkeypatch)
+
+    source = FakeDownloadSource({"1": "无解书"})
+    result = downloader.run_batch(
+        ["1"], str(target), source=source, work_dir=str(denied_work)
+    )
+
+    assert result["success"] == 0
+    assert result["failed"] == 1
+    item = result["items"][0]
+    assert item["ok"] is False
+    assert item["error_code"] == ERROR_PERMISSION_DENIED
+    assert "两处临时目录都不可用" in item["error_message"]
+    assert str(denied_work) in item["error_message"]
+    assert str(target) in item["error_message"]
+    assert list(target.glob(".jml-tmp-*")) == []
+
+
+def test_normal_work_dir_does_not_log_fallback_warning(monkeypatch, tmp_path):
+    """正常情况不受影响：临时目录仍在 work_dir，不出现降级 warn 日志。"""
+    target = tmp_path / "out"
+    work = tmp_path / "work"
+
+    logs: list[dict] = []
+    events.BUS.subscribe(EVENT_DOWNLOAD_LOG, logs.append)
+    source = FakeDownloadSource({"1": "正常书"}, record_dest_dirs=True)
+
+    result = downloader.run_batch(
+        ["1"], str(target), source=source, work_dir=str(work)
+    )
+
+    assert result["success"] == 1
+    assert source.dest_dirs
+    assert all(path.startswith(str(work)) for path in source.dest_dirs)
+    assert not any(
+        "临时目录不可用，已降级到下载目录" in entry["message"] for entry in logs
+    )
+    assert not any(entry["level"] == "warn" for entry in logs)
+    assert list(work.glob(".jml-tmp-*")) == []
 
 
 def test_stale_artifacts_are_cleaned_but_normal_zip_kept(tmp_path):

@@ -151,6 +151,10 @@ def _cleanup_stale_artifacts(directory: str) -> None:
 def _prepare_work_base(target_dir: str, work_dir: str | None) -> str:
     """确定临时工作目录的父目录（调用方给了就用它，否则用下载目录）。
 
+    **不因父目录不可用而整批失败**：临时目录的降级链在 ``_create_work_dir``
+    里按本子执行（首选 ``work_dir`` → 下载目录 → 该本失败）。这里只负责
+    尽量创建首选父目录，失败就记诊断后原样返回，交给单本降级处理。
+
     顺手清理同一父目录下超期的 ``.jml-tmp-*``（>24h），避免崩溃残留堆积。
     """
     try:
@@ -162,7 +166,10 @@ def _prepare_work_base(target_dir: str, work_dir: str | None) -> str:
     try:
         os.makedirs(base, exist_ok=True)
     except OSError as exc:
-        raise InvalidArgumentError(f"临时工作目录不可用: {base}（{exc}）") from exc
+        diagnostics.record(
+            "WORK_DIR_UNAVAILABLE", f"临时目录父目录不可用: {base}", exc
+        )
+        return base
 
     try:
         entries = list(os.scandir(base))
@@ -186,24 +193,81 @@ def _prepare_work_base(target_dir: str, work_dir: str | None) -> str:
     return base
 
 
+def _ensure_work_path(base: str, safe_id: str) -> str:
+    """在 ``base`` 下建一个本子的临时工作目录；失败把 ``OSError`` 抛给调用方。"""
+    path = os.path.join(base, f"{WORK_DIR_PREFIX}{safe_id}-{uuid.uuid4().hex[:8]}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def _create_work_dir(
-    target_dir: str, book_id: str, work_dir: str | None = None
+    target_dir: str,
+    book_id: str,
+    work_dir: str | None = None,
+    batch_id: str = "",
 ) -> str:
     """建本子的临时工作目录（图片暂存，打包后清理）。
 
+    降级链（按顺序尝试，成功即止）：
+
+    1. 调用方传入的 ``work_dir``（C# 传 ``%LOCALAPPDATA%\\JML\\tmp``）；
+    2. ``<target_dir>\\.jml-tmp-<book>-<rand>``（下载目录内，用户肯定可写）；
+    3. 两处都不可用 → 抛 ``PermissionError``（错误码仍为 ``PERMISSION_DENIED``），
+       消息写明"两处临时目录都不可用"并带上两处路径。
+
+    降级成功时发一条 warn 级 ``download.log``（经统一脱敏，不含任何凭据）。
     ``work_dir`` 由调用方传入（缺省 = 下载目录），不硬编码任何路径。
     刻意不用 ``tempfile.mkdtemp``：它固定用 0o700 建目录，在受限环境
     会出现"目录建得出来但写不进去"的情况。
     """
-    base = os.fspath(work_dir) if work_dir else target_dir
-    os.makedirs(base, exist_ok=True)
+    try:
+        preferred = os.fspath(work_dir) if work_dir else target_dir
+    except TypeError as exc:
+        raise InvalidArgumentError(
+            f"临时工作目录类型不合法: {type(work_dir).__name__}"
+        ) from exc
+
     safe_id = "".join(
         char if (char.isascii() and (char.isalnum() or char in "_-")) else "_"
         for char in str(book_id)
     )[:32] or "book"
-    path = os.path.join(base, f"{WORK_DIR_PREFIX}{safe_id}-{uuid.uuid4().hex[:8]}")
-    os.makedirs(path, exist_ok=True)
-    return path
+
+    first_error: OSError | None = None
+    try:
+        return _ensure_work_path(preferred, safe_id)
+    except OSError as exc:
+        first_error = exc
+        diagnostics.record("WORK_DIR_UNAVAILABLE", f"临时目录不可用: {preferred}", exc)
+
+    assert first_error is not None  # 上面一定走过 except（成功已提前 return）
+    fallback = os.fspath(target_dir)
+    if os.path.abspath(preferred) != os.path.abspath(fallback):
+        try:
+            path = _ensure_work_path(fallback, safe_id)
+        except OSError as second_error:
+            diagnostics.record(
+                "WORK_DIR_UNAVAILABLE",
+                f"下载目录内临时目录不可用: {fallback}",
+                second_error,
+            )
+            raise PermissionError(
+                "两处临时目录都不可用："
+                f"首选 {preferred}（{type(first_error).__name__}: {first_error}）；"
+                f"降级 {fallback}（{type(second_error).__name__}: {second_error}）"
+            ) from second_error
+        _emit_log(
+            batch_id,
+            LOG_WARN,
+            f"临时目录不可用，已降级到下载目录：{fallback}"
+            f"（原因：{type(first_error).__name__}）",
+        )
+        return path
+
+    raise PermissionError(
+        "两处临时目录都不可用："
+        f"首选 {preferred}（{type(first_error).__name__}: {first_error}）；"
+        f"降级 {fallback}（{type(first_error).__name__}: {first_error}）"
+    ) from first_error
 
 
 def _emit(event_type: str, payload: dict) -> None:
@@ -360,7 +424,7 @@ def _run_one_book(
             batch_id, LOG_INFO, f"开始下载 JM{book_id}: {title or naming.UNKNOWN_TITLE}"
         )
 
-        temp_dir = _create_work_dir(target_dir, book_id, work_dir)
+        temp_dir = _create_work_dir(target_dir, book_id, work_dir, batch_id)
         image_paths: list[str] = []
         for chapter_index, chapter in enumerate(chapters, start=1):
             # 检查点 2：每章开始
