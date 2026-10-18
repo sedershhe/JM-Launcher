@@ -4,11 +4,16 @@
   config.schema.json 文件）
 - 写入时校验类型与范围（type/enum/min/max/required），非法 → ConfigError
   拒绝写入并回退默认值（对应旧缺陷 #5：schema 真正用于校验）
+- ``describe_schema()`` 把 schema 枚举成设置界面字段列表（类型受限于
+  text/password/number/bool/select/path），供主设置窗口动态表单使用
 - 存储路径：%APPDATA%/JML/plugins/{id}/config.json
   （用 os.environ["APPDATA"]，注释与 docstring 一律不写裸反斜杠路径，
   避免 SyntaxWarning——见计划书 11.5 坑 #4）
 
-安全红线：配置文件不含任何凭据（凭据走凭据管理器/DPAPI，阶段 3）。
+安全红线：配置文件不含任何凭据。schema 里 ``"ui": "password"`` 的项视为
+凭据类字段：值只留在进程内存、绝不写入 config.json，``describe_schema()``
+也不回传值（只给 has_value）；schema 本身同样不得声明非空 password 默认值。
+真正的持久化凭据应走 C# 侧凭据管理器/DPAPI（阶段 3）。
 """
 
 from __future__ import annotations
@@ -19,8 +24,19 @@ import threading
 
 from jml.core.protocol import ConfigError
 
-#: 支持的 schema 字段类型（type 取值）
+#: 支持的 schema 字段类型（type 取值，用于校验）
 _SUPPORTED_TYPES = ("string", "integer", "number", "boolean")
+
+#: describe_schema() 输出的界面字段类型（C# 动态表单只认这六种）
+UI_FIELD_TYPES = ("text", "password", "number", "bool", "select", "path")
+
+#: schema type → 默认界面字段类型（未声明 enum / ui 时使用）
+_UI_TYPE_BY_SCHEMA_TYPE = {
+    "string": "text",
+    "integer": "number",
+    "number": "number",
+    "boolean": "bool",
+}
 
 #: 类型校验时 Python 侧的映射（integer 排除 bool，bool 是 int 的子类）
 _TYPE_CHECKERS = {
@@ -46,6 +62,14 @@ class PluginConfig:
         self._plugin_id: str = manifest["id"]
         self._schema: dict = self._load_schema(manifest)
         self._defaults = self._build_defaults(self._plugin_id, self._schema)
+        # 界面字段类型一次算好；password 项单独记住（不回值、不落盘）
+        self._field_types = {
+            key: self._ui_type(self._plugin_id, key, rule)
+            for key, rule in self._schema.items()
+        }
+        self._password_keys = frozenset(
+            key for key, ftype in self._field_types.items() if ftype == "password"
+        )
         self._path = self._storage_path(self._plugin_id)
         self._values = dict(self._defaults)
         self._load_stored()
@@ -69,6 +93,14 @@ class PluginConfig:
             self._values[key] = checked
             self._save()
 
+    def validate(self, key: str, value: object) -> object:
+        """只校验不写入（桥接层先用它区分"值非法"与"落盘失败"两种错误）。
+
+        校验通过则原样返回值；不通过抛 ConfigError，配置与磁盘均不变。
+        """
+        with self._lock:
+            return self._validate(key, value)
+
     def as_dict(self) -> dict:
         """返回全部配置项当前值的浅拷贝。"""
         with self._lock:
@@ -82,6 +114,53 @@ class PluginConfig:
     def schema(self) -> dict:
         """返回 schema 本体（诊断与设置界面生成用）。"""
         return self._schema
+
+    def describe_schema(self) -> list[dict]:
+        """把 schema 枚举成设置界面字段列表（顺序与 schema 声明一致）。
+
+        每项::
+
+            {"key": str, "label": str, "type": str,
+             "default": <标量>, "value": <当前值>, "options": [<标量>...],
+             "min": <标量>(可选), "max": <标量>(可选)}
+
+        - ``type`` 只取 :data:`UI_FIELD_TYPES`（text/password/number/bool/
+          select/path）；未声明 ``ui`` 时：有 ``enum`` → select，否则按
+          schema type 映射；
+        - ``label`` 优先取 schema 的 ``label``，其次 ``title``，都没有用 key；
+        - password 项：``value`` 与 ``default`` 恒为空串，另给 ``has_value``
+          布尔；**任何凭据值都不出现在返回值里**。
+        """
+        with self._lock:
+            fields: list[dict] = []
+            for key, rule in self._schema.items():
+                ftype = self._field_types[key]
+                value = self._values.get(key, self._defaults.get(key))
+                field = {
+                    "key": key,
+                    "label": str(rule.get("label") or rule.get("title") or key),
+                    "type": ftype,
+                    "default": self._defaults.get(key),
+                    "value": value,
+                    "options": (
+                        list(rule["enum"]) if isinstance(rule.get("enum"), list) else []
+                    ),
+                }
+                if "min" in rule:
+                    field["min"] = rule["min"]
+                if "max" in rule:
+                    field["max"] = rule["max"]
+                if ftype == "password":
+                    # 安全红线：密码值/默认值一律不回传，只说明"是否已设置"
+                    field["default"] = ""
+                    field["value"] = ""
+                    field["has_value"] = bool(value)
+                fields.append(field)
+            return fields
+
+    def is_password_field(self, key: str) -> bool:
+        """该配置项是否为 password 类型（值不回传、不落盘）。"""
+        return key in self._password_keys
 
     @property
     def storage_path(self) -> str:
@@ -133,6 +212,12 @@ class PluginConfig:
                 )
             if "enum" in rule and not isinstance(rule["enum"], list):
                 raise ConfigError(f"插件 {plugin_id} 的配置项 {key} 的 enum 必须是数组")
+            if PluginConfig._ui_type(plugin_id, key, rule) == "password":
+                # 安全红线：密码项不得在 schema 里带非空默认值（凭据不入 schema/配置）
+                if "default" in rule and rule["default"] not in ("", None):
+                    raise ConfigError(
+                        f"插件 {plugin_id} 的密码项 {key} 不得声明非空 default"
+                    )
             if "default" in rule:
                 # 默认值本身也要过一遍校验，schema 写错尽早暴露
                 defaults[key] = PluginConfig._check_value(plugin_id, key, rule, rule["default"])
@@ -144,6 +229,26 @@ class PluginConfig:
                     )
                 defaults[key] = {"string": "", "integer": 0, "number": 0.0, "boolean": False}[ftype]
         return defaults
+
+    @staticmethod
+    def _ui_type(plugin_id: str, key: str, rule: dict) -> str:
+        """把一个 schema 规则映射成界面字段类型（UI_FIELD_TYPES 之一）。
+
+        规则：显式 ``ui`` 优先；否则有 ``enum`` → select；否则按 schema type
+        映射（string→text / integer|number→number / boolean→bool）。
+        未知 ``ui`` 视为 schema 写错，构造阶段就抛 ConfigError，尽早暴露。
+        """
+        hint = rule.get("ui")
+        if hint is not None:
+            if not isinstance(hint, str) or hint not in UI_FIELD_TYPES:
+                raise ConfigError(
+                    f"插件 {plugin_id} 的配置项 {key} 的 ui 非法: {hint!r}, "
+                    f"允许值: {', '.join(UI_FIELD_TYPES)}"
+                )
+            return hint
+        if isinstance(rule.get("enum"), list):
+            return "select"
+        return _UI_TYPE_BY_SCHEMA_TYPE[rule.get("type", "string")]
 
     @staticmethod
     def _storage_path(plugin_id: str) -> str:
@@ -169,19 +274,29 @@ class PluginConfig:
         for key, value in stored.items():
             if key not in self._schema:
                 continue  # schema 里已删除的项：忽略存量
+            if key in self._password_keys:
+                continue  # 密码项从不落盘；存量里的同名项（人工编辑/旧版）也不采用
             try:
                 self._values[key] = self._validate(key, value)
             except ConfigError:
                 continue  # 存量值不合法 → 忽略，保持默认值（对应旧缺陷 #5）
 
     def _save(self) -> None:
-        """把当前值落盘（原子写：先写临时文件再替换）。"""
+        """把当前值落盘（原子写：先写临时文件再替换）。
+
+        安全红线：password 项永远不写入 config.json（值只留在进程内存）。
+        """
+        payload = {
+            key: value
+            for key, value in self._values.items()
+            if key not in self._password_keys
+        }
         directory = os.path.dirname(self._path)
         os.makedirs(directory, exist_ok=True)
         tmp_path = self._path + ".tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as fh:
-                json.dump(self._values, fh, ensure_ascii=False, indent=2)
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self._path)
         except OSError as exc:
             raise ConfigError(f"插件 {self._plugin_id} 的配置写入失败: {exc}") from exc

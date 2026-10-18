@@ -12,6 +12,9 @@
     version() -> str                               后端代码版本
     bootstrap(plugins_dir: str) -> str             宿主引导（幂等），返回 JSON
     list_plugins(plugins_dir: str) -> str          只扫描不加载，返回 JSON
+    list_plugin_settings() -> str                  已加载插件的设置定义，返回 JSON
+    set_plugin_setting(plugin_id: str, key: str, value_json: str) -> str
+                                                   写插件设置（按 schema 校验 + 落盘），返回 JSON
     set_event_sink(callback) -> str                注册事件出口；callback(事件 JSON 字符串)
     clear_event_sink() -> str                      移除事件出口
     parse_book_ids(text: str) -> str               编号解析，返回 JSON
@@ -59,12 +62,15 @@ from jml.core import (
 from jml.core.errors import (
     ERROR_BATCH_NOT_FOUND,
     ERROR_INVALID_ARGUMENT,
+    ERROR_IO,
     ERROR_MESSAGES,
+    ERROR_NOT_FOUND,
     ERROR_UNKNOWN,
     classify,
     error_payload,
     make_error,
 )
+from jml.core.protocol import ConfigError
 
 __version__ = "0.3.0"
 
@@ -289,6 +295,121 @@ def list_plugins(plugins_dir: str) -> str:
         )
     except Exception as exc:
         return _dumps(_host_failure(exc))
+
+
+# ---------------------------------------------------------------------------
+# 插件设置项入口（阶段 3；schema → 主设置窗口动态表单）
+# ---------------------------------------------------------------------------
+
+
+def list_plugin_settings() -> str:
+    """返回已加载插件的设置定义，供主设置窗口生成动态表单。
+
+    成功::
+
+        {"ok": true, "plugins": [
+            {"plugin_id": str, "plugin_name": str,
+             "fields": [{"key", "label", "type", "default", "value",
+                         "options": [...], "min", "max"}（password 另有 has_value）]}
+        ]}
+
+    约束：
+    - 只列**已加载且声明了非空 config.schema** 的插件（加载失败/无设置项的
+      插件不出现）；顺序按 plugin_id 排序，保证界面稳定；
+    - ``type`` ∈ text / password / number / bool / select / path；
+    - password 项 ``value`` 恒为空串、附 ``has_value`` 布尔，**凭据值不回传**；
+    - 值取插件 setup 期间实际使用的同一个配置实例（默认值已回填）。
+    """
+    try:
+        from jml.host import loader
+
+        plugins = []
+        for manifest in loader.loaded_plugins():
+            store = loader.config_for(manifest["id"])
+            if store is None:
+                continue
+            fields = store.describe_schema()
+            if not fields:
+                continue
+            plugins.append(
+                {
+                    "plugin_id": manifest["id"],
+                    "plugin_name": manifest["name"],
+                    "fields": fields,
+                }
+            )
+        return _dumps({"ok": True, "plugins": plugins})
+    except Exception as exc:
+        return _failure(exc)
+
+
+def set_plugin_setting(plugin_id: str, key: str, value_json: str) -> str:
+    """写入单个插件设置项：按 manifest schema 校验，非法拒绝且保持原值。
+
+    参数:
+        plugin_id: 插件 id（必须已加载）；
+        key: schema 里声明的设置项 key；
+        value_json: 设置值的 JSON 文本（如 ``"\\"文本\\""`` / ``16`` / ``true``）。
+
+    成功::
+
+        {"ok": true, "key": str, "value": <标量>}     # password 项额外 has_value，
+                                                       # value 恒为空串且不落盘
+
+    失败：
+    - 空 plugin_id / key、value_json 不是合法 JSON、类型/枚举/范围不符
+      → ``INVALID_ARGUMENT``（拒绝写入，内存与磁盘上的原值都不变）；
+    - 插件不存在或未加载 → ``NOT_FOUND``；
+    - 校验通过但写 config.json 失败（权限/磁盘）→ ``IO_ERROR``。
+    """
+    try:
+        pid = str(plugin_id or "").strip()
+        name = str(key or "").strip()
+        if not pid or not name:
+            return _dumps(
+                make_error(ERROR_INVALID_ARGUMENT, "插件 id 与设置项 key 不能为空")
+            )
+
+        from jml.host import loader
+
+        loaded_ids = {manifest["id"] for manifest in loader.loaded_plugins()}
+        store = loader.config_for(pid)
+        if store is None or pid not in loaded_ids:
+            return _dumps(make_error(ERROR_NOT_FOUND, f"插件未加载或不存在: {pid}"))
+
+        try:
+            value = json.loads(value_json) if isinstance(value_json, str) else value_json
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            return _dumps(
+                make_error(ERROR_INVALID_ARGUMENT, f"设置值不是合法 JSON: {exc}")
+            )
+
+        try:
+            store.validate(name, value)
+        except ConfigError as exc:
+            # ConfigError 不是 AppError，不能交给 classify（会落到 UNKNOWN_ERROR）；
+            # 校验失败统一映射成契约 §1.1 的 INVALID_ARGUMENT（拒绝写入，原值不变）。
+            return _dumps(
+                make_error(
+                    ERROR_INVALID_ARGUMENT, _setting_error_message(store, name, exc)
+                )
+            )
+
+        try:
+            store.set(name, value)
+        except ConfigError as exc:
+            # 校验已通过，此处的 ConfigError 只可能来自落盘失败（见 _save）。
+            return _dumps(make_error(ERROR_IO, _setting_error_message(store, name, exc)))
+
+        current = store.get(name)
+        if store.is_password_field(name):
+            # 安全红线：password 值永不回传
+            return _dumps(
+                {"ok": True, "key": name, "value": "", "has_value": bool(current)}
+            )
+        return _dumps({"ok": True, "key": name, "value": current})
+    except Exception as exc:
+        return _failure(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +775,21 @@ def reset_host_state() -> None:
 # ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
+
+
+def _setting_error_message(store, key: str, exc: BaseException) -> str:
+    """插件设置错误文案：password 项不回显任何值。
+
+    ``PluginConfig`` 的校验错误原文会带非法值 repr；密码值属于凭据，
+    即使校验失败也不能出现在 C# 可展示的错误消息里，统一换成固定文案。
+    """
+    try:
+        is_secret = store.is_password_field(key)
+    except Exception:  # pragma: no cover - 防御：store 形状异常按普通项处理
+        is_secret = False
+    if is_secret:
+        return "password 设置值不合法（出于安全不回显具体值）"
+    return str(exc)
 
 
 def _coerce_book_ids(value) -> list[str]:

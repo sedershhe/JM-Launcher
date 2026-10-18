@@ -121,6 +121,12 @@ def load_all(plugins_dir: str) -> dict:
     manifests = discover(plugins_dir)
     ordered = topo_sort(manifests)
 
+    # 重新装配语义：上一次的已加载快照与配置实例都作废（配置随后按新 manifest 重建）
+    with _LOADED_LOCK:
+        _LOADED_MANIFESTS.clear()
+    with _CONFIG_STORES_LOCK:
+        _CONFIG_STORES.clear()
+
     loaded: list[dict] = []
     failed: list[dict] = []
 
@@ -153,6 +159,9 @@ def load_all(plugins_dir: str) -> dict:
                 "development_sample": manifest["development_sample"],
             }
         )
+        # 设置界面按"已加载插件"枚举设置定义（失败插件不进快照）
+        with _LOADED_LOCK:
+            _LOADED_MANIFESTS[plugin_id] = manifest
 
     return {
         "loaded": loaded,
@@ -263,6 +272,30 @@ _SYS_PATH_LOCK = threading.RLock()
 _CONFIG_STORES: dict[str, "object"] = {}
 _CONFIG_STORES_LOCK = threading.RLock()
 
+#: 已成功装配的插件 manifest: {plugin_id: manifest}（顺序无关，读取时按 id 排序）
+_LOADED_MANIFESTS: dict[str, dict] = {}
+_LOADED_LOCK = threading.RLock()
+
+
+def loaded_plugins() -> list[dict]:
+    """已加载插件的 manifest 快照（按 id 排序，浅拷贝）。
+
+    只读快照：调用方（设置窗口、诊断）不得直接改宿主内部状态；
+    加载失败的插件不在返回列表里。
+    """
+    with _LOADED_LOCK:
+        return [dict(_LOADED_MANIFESTS[pid]) for pid in sorted(_LOADED_MANIFESTS)]
+
+
+def config_for(plugin_id: str):
+    """取已加载插件的配置存储（不存在返回 None，不新建）。
+
+    与插件 setup 期间 ``ctx.config_get`` 用的是同一个实例，保证设置窗口
+    读到的当前值与插件读到的一致。
+    """
+    with _CONFIG_STORES_LOCK:
+        return _CONFIG_STORES.get(plugin_id)
+
 
 def _get_or_create_config(manifest: dict):
     """取或建插件的配置存储（缓存按插件 id）。"""
@@ -284,3 +317,5 @@ def reset() -> None:
         _LOAD_ERRORS = []
     with _CONFIG_STORES_LOCK:
         _CONFIG_STORES.clear()
+    with _LOADED_LOCK:
+        _LOADED_MANIFESTS.clear()

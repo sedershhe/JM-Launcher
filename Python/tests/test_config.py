@@ -182,6 +182,22 @@ def test_set_unknown_key_raises(manifest_with_schema):
     assert cfg.as_dict() == {"threads": 4}
 
 
+def test_validate_only_checks_without_writing(manifest_with_schema):
+    """validate 只校验：合法返回值，非法抛 ConfigError，都不改当前值与磁盘。"""
+    schema = {"threads": {"type": "integer", "default": 4, "min": 1, "max": 32}}
+    cfg = PluginConfig(manifest_with_schema(schema))
+
+    assert cfg.validate("threads", 8) == 8
+    assert cfg.get("threads") == 4
+    assert not os.path.exists(cfg.storage_path)
+
+    with pytest.raises(ConfigError):
+        cfg.validate("threads", 99)
+    with pytest.raises(ConfigError):
+        cfg.validate("not_in_schema", 1)
+    assert cfg.as_dict() == {"threads": 4}
+
+
 def test_required_without_default_raises(manifest_with_schema):
     """required=true 但缺 default：构造阶段就抛 ConfigError（不静默给零值）。"""
     schema = {"token": {"type": "string", "required": True}}
@@ -292,3 +308,118 @@ def test_storage_path_under_appdata(manifest_with_schema):
     path = cfg.storage_path
     assert path.endswith(os.path.join("JML", "plugins", "my_plugin", "config.json"))
     assert "my_plugin" in path
+
+
+# ---------------------------------------------------------------------------
+# describe_schema（设置界面字段枚举）与 password 安全语义
+# ---------------------------------------------------------------------------
+
+
+def test_describe_schema_maps_all_ui_types(manifest_with_schema):
+    """六种界面类型：number/text/bool/select/path/password，顺序与 schema 一致。"""
+    schema = {
+        "threads": {"type": "integer", "default": 4, "min": 1, "max": 32, "label": "并发数"},
+        "keyword": {"type": "string", "default": "abc"},
+        "enabled": {"type": "boolean", "default": True},
+        "mode": {"type": "string", "default": "fast", "enum": ["fast", "safe"]},
+        "work_dir": {"type": "string", "default": "", "ui": "path"},
+        "token": {"type": "string", "default": "", "ui": "password"},
+    }
+    cfg = PluginConfig(manifest_with_schema(schema))
+
+    fields = cfg.describe_schema()
+
+    assert [field["key"] for field in fields] == list(schema)
+    by_key = {field["key"]: field for field in fields}
+    assert [field["type"] for field in fields] == [
+        "number",
+        "text",
+        "bool",
+        "select",
+        "path",
+        "password",
+    ]
+    assert by_key["threads"]["label"] == "并发数"
+    assert by_key["threads"]["min"] == 1
+    assert by_key["threads"]["max"] == 32
+    assert by_key["keyword"]["label"] == "keyword"  # 缺省用 key
+    assert by_key["mode"]["options"] == ["fast", "safe"]
+    assert by_key["mode"]["value"] == "fast"
+    assert by_key["work_dir"]["value"] == ""
+
+
+def test_describe_schema_unknown_ui_hint_raises(manifest_with_schema):
+    """未知 ui 提示：构造阶段抛 ConfigError（schema 写错尽早暴露）。"""
+    schema = {"thing": {"type": "string", "default": "x", "ui": "slider"}}
+
+    with pytest.raises(ConfigError) as excinfo:
+        PluginConfig(manifest_with_schema(schema))
+
+    assert "ui 非法" in str(excinfo.value)
+
+
+def test_password_value_never_returned_nor_persisted(manifest_with_schema):
+    """password 项：describe_schema 不回值，只给 has_value；config.json 不含它。"""
+    schema = {
+        "threads": {"type": "integer", "default": 4},
+        "token": {"type": "string", "ui": "password"},
+    }
+    cfg = PluginConfig(manifest_with_schema(schema))
+    secret = "CONFIG-SECRET-9"
+
+    before = {f["key"]: f for f in cfg.describe_schema()}["token"]
+    assert before["value"] == ""
+    assert before["has_value"] is False
+
+    cfg.set("token", secret)
+
+    after = {f["key"]: f for f in cfg.describe_schema()}["token"]
+    assert after["value"] == ""
+    assert after["has_value"] is True
+    assert secret not in json.dumps(cfg.describe_schema(), ensure_ascii=False)
+    # 插件本进程仍能读到（只对 C# 隐藏）
+    assert cfg.get("token") == secret
+
+    with open(cfg.storage_path, "r", encoding="utf-8") as fh:
+        stored_text = fh.read()
+    assert "token" not in stored_text
+    assert secret not in stored_text
+
+
+def test_password_non_empty_default_rejected(manifest_with_schema):
+    """password 项不得在 schema 里声明非空默认值（凭据不入 schema）。"""
+    schema = {"token": {"type": "string", "ui": "password", "default": "hunter2"}}
+
+    with pytest.raises(ConfigError) as excinfo:
+        PluginConfig(manifest_with_schema(schema))
+
+    assert "密码项" in str(excinfo.value)
+    assert "不得声明非空 default" in str(excinfo.value)
+
+
+def test_password_empty_default_is_allowed(manifest_with_schema):
+    """空默认值（常见写法）允许，且不会被当成已设置。"""
+    cfg = PluginConfig(
+        manifest_with_schema(
+            {"token": {"type": "string", "ui": "password", "default": ""}}
+        )
+    )
+
+    token = {f["key"]: f for f in cfg.describe_schema()}["token"]
+    assert token["value"] == ""
+    assert token["has_value"] is False
+
+
+def test_stored_password_value_ignored(manifest_with_schema):
+    """存量 config.json 里若有人手写了 password 值：不采用（保持未设置）。"""
+    schema = {"token": {"type": "string", "ui": "password"}}
+    cfg = PluginConfig(manifest_with_schema(schema))
+    os.makedirs(os.path.dirname(cfg.storage_path), exist_ok=True)
+    with open(cfg.storage_path, "w", encoding="utf-8") as fh:
+        json.dump({"token": "LEAKED"}, fh)
+
+    cfg2 = PluginConfig(manifest_with_schema(schema))
+
+    assert cfg2.get("token") == ""
+    assert cfg2.is_password_field("token") is True
+    assert cfg2.is_password_field("other") is False

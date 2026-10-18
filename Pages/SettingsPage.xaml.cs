@@ -10,7 +10,8 @@ using Microsoft.Win32;
 namespace JML.Pages;
 
 /// <summary>
-/// 设置页（阶段 3）：账号状态 / 账号修改窗口入口 / 已保存账号登录 / 下载目录记忆。
+/// 设置页（阶段 3）：账号状态 / 账号修改窗口入口 / 已保存账号登录 / 下载目录记忆 /
+/// 插件设置动态表单（见 <c>Pages\SettingsPage.PluginSettings.cs</c>）。
 ///
 /// 纪律：
 /// - 账号凭据不经过本页持久化，本页只显示打码用户名；
@@ -18,7 +19,9 @@ namespace JML.Pages;
 /// - 启动时只查询登录态与本地“是否已保存凭据”，不静默自动登录（避免无谓网络与失败弹框），
 ///   登录由用户点击或后续插件按需触发；
 /// - 打开 <see cref="AccountDialog"/> 是模态，关闭后刷新账号状态；
-/// - 下载目录只写入 <see cref="AppSettings.DownloadDir"/>（纯路径），不存凭据。
+/// - 下载目录只写入 <see cref="AppSettings.DownloadDir"/>（纯路径），不存凭据；
+/// - 插件设置项全部由 Python 的 schema 描述驱动，本页不硬编码任何插件字段；
+///   password 字段值不回填、不缓存，留空表示不修改。
 /// </summary>
 public partial class SettingsPage : UserControl
 {
@@ -30,15 +33,25 @@ public partial class SettingsPage : UserControl
     private bool _loggedIn;
 
     public SettingsPage()
-        : this(new CredentialStoreAdapter(), AccountGateway.Instance)
+        : this(new CredentialStoreAdapter(), AccountGateway.Instance, PluginSettingsGateway.Instance)
     {
     }
 
     /// <summary>测试可注入假凭据存储与假账号网关；生产使用默认实例。</summary>
     internal SettingsPage(ISavedCredentialStore store, IAccountGateway gateway)
+        : this(store, gateway, PluginSettingsGateway.Instance)
+    {
+    }
+
+    /// <summary>测试可再注入假插件设置网关（离线断言动态表单，不碰 Python）。</summary>
+    internal SettingsPage(
+        ISavedCredentialStore store,
+        IAccountGateway gateway,
+        IPluginSettingsGateway pluginSettings)
     {
         _store = store;
         _gateway = gateway;
+        _pluginSettings = pluginSettings;
         InitializeComponent();
         _settings = AppSettings.Load();
         ApplyDownloadDirectory();
@@ -76,7 +89,8 @@ public partial class SettingsPage : UserControl
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         ApplyDownloadDirectory();
-        await RefreshAccountStatusAsync();
+        // 账号状态与插件设置并行拉取；两者内部都已收口，不会因一方失败影响另一方。
+        await Task.WhenAll(RefreshAccountStatusAsync(), RefreshPluginSettingsAsync());
     }
 
     /// <summary>从 Python 查一次账号状态；失败只显示可读错误，不影响页面其它功能。</summary>

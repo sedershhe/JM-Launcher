@@ -42,6 +42,14 @@
         <Setter Property="Background" Value="{DynamicResource ColorBrushInputHoverBg}" />
     </Style>
 
+    <!-- ========== 密码框（与 JmlInputBox 同源的空态可见性修正） ==========
+         基线 PlainPasswordBox 的 Background 同样是透明、BorderBrush 是底色，
+         空密码框在未悬停/未聚焦时看不出边界。设置页的插件 password 字段用本样式，
+         模板本身与外部 UI 库都不动。 -->
+    <Style x:Key="JmlPasswordBox" TargetType="PasswordBox" BasedOn="{StaticResource PlainPasswordBox}">
+        <Setter Property="Background" Value="{DynamicResource ColorBrushInputHoverBg}" />
+    </Style>
+
     <!-- ========== 顶部一级导航胶囊（PCL2 MyRadioButton） ==========
          MyRadioButton.xaml:4  MinHeight/MaxHeight=27、CornerRadius=13.5、背景 #01EAF2FE
          MyRadioButton.xaml:6  图标 Path Margin=12,0,0,0、MaxHeight/MaxWidth=16、Stretch=Uniform、Fill=White

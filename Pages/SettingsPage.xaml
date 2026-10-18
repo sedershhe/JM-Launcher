@@ -69,11 +69,29 @@
                 </StackPanel>
             </ctl:JmlCard>
 
-            <!-- 插件设置：阶段 4 由插件注册 -->
+            <!-- 插件设置：按已加载插件的 manifest config.schema 动态生成字段（任务 3-B）。
+                 字段控件由 Pages\SettingsPage.PluginSettings.cs 运行时创建，
+                 这里只留空态文字 / 错误行 / 字段容器 / 保存按钮，样式全部复用现有资源。 -->
             <ctl:JmlCard x:Name="CardPlugin" Header="插件设置" Margin="0,12,0,0" HorizontalAlignment="Stretch">
-                <TextBlock Text="插件可在阶段 4 注册设置项。"
-                           TextWrapping="Wrap"
-                           Foreground="{DynamicResource ColorBrushGray3}" />
+                <StackPanel>
+                    <TextBlock x:Name="TextPluginEmpty"
+                               Text="正在加载插件设置…"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource ColorBrushGray3}" />
+                    <TextBlock x:Name="TextPluginError"
+                               Visibility="Collapsed"
+                               Margin="0,6,0,0"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource ColorBrushError}" />
+                    <StackPanel x:Name="PanelPluginSettings" />
+                    <Button x:Name="BtnSavePluginSettings"
+                            Content="保存"
+                            Margin="0,6,0,0"
+                            Visibility="Collapsed"
+                            HorizontalAlignment="Left"
+                            Style="{StaticResource SecondaryButton}"
+                            Click="BtnSavePluginSettings_Click" />
+                </StackPanel>
             </ctl:JmlCard>
 
         </StackPanel>
