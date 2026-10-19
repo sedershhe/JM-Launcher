@@ -134,5 +134,5 @@ scripts/publish-portable.ps1
 * [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python) — 核心业务库 jmcomic
 * [PCL-Community/PCL-CE](https://github.com/PCL-Community/PCL-CE) 与 [Meloong-Git/PCL](https://github.com/Meloong-Git/PCL) — 界面控件与动画方案
 * [PlainToolkit.UI](https://github.com/PCL-Community) — PCL2 风格 WPF 控件库
-</tool\_calls:6124c78e>
+
 
