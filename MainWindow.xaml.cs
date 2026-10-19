@@ -1129,12 +1129,17 @@ public partial class MainWindow : Window, IUiIntentHandler
         MainContent.Content = setup;
     }
 
-    /// <summary>进入主界面：默认显示插件页，并同步导航按钮选中态。</summary>
+    /// <summary>
+    /// 进入主界面：默认显示下载页，并同步导航按钮选中态。
+    /// 同时启动一次静默自动登录：有已保存凭据才发请求，失败不弹框；
+    /// 设置页打开时会等待同一个任务，避免状态查询早于登录完成。
+    /// </summary>
     private void ShowMain()
     {
-        NavPlugin.IsChecked = true;
-        _nav.Navigate(MainPage.Plugin);
+        NavDownload.IsChecked = true;
+        _nav.Navigate(MainPage.Download);
         UpdateContent();
+        _ = _settingsPage.EnsureAutoLoginAsync();
     }
 
     /// <summary>一级导航按钮点击（四个按钮共用一个处理器，按发送者区分）。</summary>

@@ -144,7 +144,7 @@ public class SavedAccountLoginTests
     }
 
     [Fact]
-    public void Settings_ShowsSavedAccountHintAndLoginButton_WithoutAutoLogin()
+    public void Settings_RefreshStatus_ShowsSavedHintWithoutLoggingIn()
     {
         UiSmokeTests.RunOnUiThread(() =>
         {
@@ -164,7 +164,7 @@ public class SavedAccountLoginTests
             Assert.Equal(Visibility.Visible, button.Visibility);
             Assert.True(button.IsEnabled);
 
-            // 启动/刷新路径不得静默登录。
+            // 仅刷新账号状态时不得静默登录；启动自动登录由 EnsureAutoLoginAsync 负责。
             Assert.DoesNotContain("Login", calls);
 
             calls.Clear();
@@ -175,6 +175,45 @@ public class SavedAccountLoginTests
                 calls.Take(3).ToArray());
             Assert.Equal("已登录：al***23", status.Text);
             Assert.Equal(Visibility.Collapsed, button.Visibility);
+        });
+    }
+
+    [Fact]
+    public void Settings_EnsureAutoLogin_WithSavedCredential_LogsInOnce()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var calls = new List<string>();
+            var store = new FakeCredentialStore(calls, ("alice123", "Not-A-Real-Password"));
+            var page = new SettingsPage(store, new FakeAccountGateway(calls));
+
+            SavedLoginOutcome? outcome = page.EnsureAutoLoginAsync().GetAwaiter().GetResult();
+
+            Assert.NotNull(outcome);
+            Assert.True(outcome!.Ok);
+            Assert.Equal(new[] { "Exists", "Load", "SetCredentials", "Login" }, calls);
+
+            // 设置页晚于主窗口加载时复用同一个任务，不重复登录。
+            SavedLoginOutcome? second = page.EnsureAutoLoginAsync().GetAwaiter().GetResult();
+            Assert.Same(outcome, second);
+            Assert.Single(calls, call => call == "Login");
+        });
+    }
+
+    [Fact]
+    public void Settings_EnsureAutoLogin_WithoutSavedCredential_DoesNotCallGateway()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var calls = new List<string>();
+            var page = new SettingsPage(
+                new FakeCredentialStore(calls, saved: null),
+                new FakeAccountGateway(calls));
+
+            SavedLoginOutcome? outcome = page.EnsureAutoLoginAsync().GetAwaiter().GetResult();
+
+            Assert.Null(outcome);
+            Assert.Equal(new[] { "Exists" }, calls);
         });
     }
 

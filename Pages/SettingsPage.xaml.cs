@@ -16,8 +16,9 @@ namespace JML.Pages;
 /// 纪律：
 /// - 账号凭据不经过本页持久化，本页只显示打码用户名；
 /// - 有保存凭据但未登录时显示「已保存账号：ab***cd（未登录）」并给出免密登录按钮；
-/// - 启动时只查询登录态与本地“是否已保存凭据”，不静默自动登录（避免无谓网络与失败弹框），
-///   登录由用户点击或后续插件按需触发；
+/// - 启动进入主界面时由 <see cref="EnsureAutoLoginAsync"/> 静默自动登录一次：
+///   有已保存凭据才发请求，失败不弹框（设置页仍显示未登录并提供手动重试）；
+/// - 登录按钮仍保留，供自动登录失败 / 用户主动重新登录时使用；
 /// - 打开 <see cref="AccountDialog"/> 是模态，关闭后刷新账号状态；
 /// - 下载目录只写入 <see cref="AppSettings.DownloadDir"/>（纯路径），不存凭据；
 /// - 插件设置项全部由 Python 的 schema 描述驱动，本页不硬编码任何插件字段；
@@ -31,6 +32,12 @@ public partial class SettingsPage : UserControl
     private bool _busy;
     private bool _hasSaved;
     private bool _loggedIn;
+
+    /// <summary>
+    /// 启动自动登录只执行一次；设置页晚于主窗口加载时直接等待同一个任务，
+    /// 避免“状态查询先完成、登录后完成”导致界面显示未登录。
+    /// </summary>
+    private Task<SavedLoginOutcome?>? _autoLoginTask;
 
     public SettingsPage()
         : this(new CredentialStoreAdapter(), AccountGateway.Instance, PluginSettingsGateway.Instance)
@@ -91,8 +98,41 @@ public partial class SettingsPage : UserControl
     {
         ApplyDownloadDirectory();
         ApplyDataRootInfo();
-        // 账号状态与插件设置并行拉取；两者内部都已收口，不会因一方失败影响另一方。
-        await Task.WhenAll(RefreshAccountStatusAsync(), RefreshPluginSettingsAsync());
+        // 插件设置与自动登录并行；账号状态必须等自动登录结束再查，避免显示未登录。
+        Task autoLogin = EnsureAutoLoginAsync();
+        Task pluginSettings = RefreshPluginSettingsAsync();
+        await autoLogin;
+        await RefreshAccountStatusAsync();
+        await pluginSettings;
+    }
+
+    /// <summary>
+    /// 启动自动登录（整个进程只执行一次）。主窗口进入主界面时调用；
+    /// 设置页打开时再次调用会直接复用同一个任务，不会重复登录。
+    /// 有已保存凭据才调用账号网关，无凭据 / 失败都不会弹框。
+    /// </summary>
+    internal Task<SavedLoginOutcome?> EnsureAutoLoginAsync()
+    {
+        return _autoLoginTask ??= AutoLoginAsync();
+    }
+
+    private async Task<SavedLoginOutcome?> AutoLoginAsync()
+    {
+        try
+        {
+            if (!SafeExists())
+            {
+                return null;
+            }
+
+            return await new SavedAccountLoginService(_store, _gateway).LoginAsync();
+        }
+        catch (Exception ex)
+        {
+            // 自动登录是后台便利功能：失败只记类型名，界面保持未登录，不弹框。
+            LogSanitizer.Log($"启动自动登录失败：{ex.GetType().Name}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -138,7 +178,7 @@ public partial class SettingsPage : UserControl
             if (!status.Ok)
             {
                 // 状态读不到时仍可判断本地是否存过凭据，从而决定是否给免密登录入口；
-                // 但绝不在这里自动登录。
+                // 但这里只刷新状态，自动登录由 EnsureAutoLoginAsync 单独负责。
                 _hasSaved = SafeExists();
                 TextAccountStatus.Foreground = (Brush)FindResource("ColorBrushError");
                 TextAccountStatus.Text =
@@ -221,7 +261,7 @@ public partial class SettingsPage : UserControl
 
     /// <summary>
     /// 用已保存账号登录：Load → SetCredentials → Login（由 <see cref="SavedAccountLoginService"/> 固定）。
-    /// 仅由用户点击触发；启动路径不会调用。失败文案已在服务内脱敏，不含密码原文。
+    /// 用户点击按钮与启动自动登录共用同一服务；失败文案已在服务内脱敏，不含密码原文。
     /// </summary>
     internal async Task LoginSavedAsync()
     {

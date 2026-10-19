@@ -17,8 +17,8 @@ public sealed class NavigationStack
 {
     private readonly object _gate = new();
 
-    /// <summary>当前一级页面</summary>
-    public MainPage Current { get; private set; } = MainPage.Plugin;
+    /// <summary>当前一级页面（2026-10-19 起默认进入下载页）</summary>
+    public MainPage Current { get; private set; } = MainPage.Download;
 
     /// <summary>当前一级页内的内页栈：空 = 未进入内页；栈顶 = 当前内页</summary>
     private readonly Stack<(string PageId, string Title)> _innerStack = new();

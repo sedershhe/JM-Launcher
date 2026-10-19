@@ -7,6 +7,7 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using JML.Bridge.Dto;
 using JML.Controls;
+using JML.Navigation;
 using JML.Pages;
 using Xunit;
 using Xunit.Sdk;
@@ -927,6 +928,15 @@ public class UiSmokeTests
                 input.ActualHeight >= 30,
                 $"设置页 InputDownloadDir 高度实测 {input.ActualHeight:0.#}；期望 ≥ 30（MinHeight=32）。");
         });
+    }
+
+    /// <summary>
+    /// 进入主界面默认展示下载页（2026-10-19 用户要求：从插件页改为下载页）。
+    /// </summary>
+    [Fact]
+    public void NavigationStack_DefaultPage_IsDownload()
+    {
+        Assert.Equal(MainPage.Download, new NavigationStack().Current);
     }
 
     /// <summary>
