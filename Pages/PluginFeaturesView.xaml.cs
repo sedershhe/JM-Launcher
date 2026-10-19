@@ -1,8 +1,10 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using JML.Bridge;
 using JML.Bridge.Dto;
+using JML.Controls;
 using JML.Infrastructure;
 
 namespace JML.Pages;
@@ -40,6 +42,60 @@ public partial class PluginFeaturesView : UserControl
             Pages.Count == 0
                 ? "未声明功能页面"
                 : $"{Pages.Count} 个功能页：{string.Join("、", Pages.Select(page => page.Title))}";
+
+        // ---- PCL2 资源行展示字段（Controls\JmlControls.xaml 的 JmlResourceRowTemplate） ----
+
+        public string TitleText => PluginName;
+
+        public string SubtitleText => string.Empty;
+
+        public IReadOnlyList<string> Tags =>
+            Pages.Count == 0 ? [] : [$"{Pages.Count} 个功能页"];
+
+        public string DescriptionText => Summary;
+
+        public IReadOnlyList<JmlResourceMetaItem> MetaItems =>
+            [new JmlResourceMetaItem(JmlResourceIcons.Source, $"插件 ID：{PluginId}")];
+
+        public IReadOnlyList<JmlResourceAction> Actions => [];
+
+        public ImageSource? Cover => null;
+
+        public Visibility LogoVisibility => Visibility.Visible;
+
+        public Visibility PlaceholderVisibility => Visibility.Collapsed;
+
+        public Visibility FailureVisibility => Visibility.Collapsed;
+
+        public Visibility CoverVisibility => Visibility.Collapsed;
+    }
+
+    /// <summary>多页面插件里的一个功能页（同样用 PCL2 资源行展示）。</summary>
+    private sealed record PageEntry(PluginPageDto Page)
+    {
+        public string TitleText => Page.Title;
+
+        public string SubtitleText => string.Empty;
+
+        public IReadOnlyList<string> Tags =>
+            string.IsNullOrWhiteSpace(Page.Template) ? [] : [Page.Template];
+
+        public string DescriptionText => "双击进入该功能页";
+
+        public IReadOnlyList<JmlResourceMetaItem> MetaItems =>
+            [new JmlResourceMetaItem(JmlResourceIcons.Source, $"页面 ID：{Page.Id}")];
+
+        public IReadOnlyList<JmlResourceAction> Actions => [];
+
+        public ImageSource? Cover => null;
+
+        public Visibility LogoVisibility => Visibility.Visible;
+
+        public Visibility PlaceholderVisibility => Visibility.Collapsed;
+
+        public Visibility FailureVisibility => Visibility.Collapsed;
+
+        public Visibility CoverVisibility => Visibility.Collapsed;
     }
 
     private readonly List<PluginEntry> _entries = [];
@@ -128,7 +184,9 @@ public partial class PluginFeaturesView : UserControl
     private void ShowPageChooser(PluginEntry entry)
     {
         _pageChooserEntry = entry;
-        PageList.ItemsSource = entry.Pages.ToList();
+        PageList.ItemsSource = entry.Pages
+            .Select(page => new PageEntry(page))
+            .ToList();
         TextPagesTitle.Text = $"选择「{entry.PluginName}」的功能页（共 {entry.Pages.Count} 个）";
         PanelPlugins.Visibility = Visibility.Collapsed;
         PanelPages.Visibility = Visibility.Visible;
@@ -137,12 +195,12 @@ public partial class PluginFeaturesView : UserControl
 
     private void PageList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (_pageChooserEntry is null || PageList.SelectedItem is not PluginPageDto page)
+        if (_pageChooserEntry is null || PageList.SelectedItem is not PageEntry entry)
         {
             return;
         }
 
-        EnterPage(_pageChooserEntry, page);
+        EnterPage(_pageChooserEntry, entry.Page);
     }
 
     private void BtnPagesBack_Click(object sender, RoutedEventArgs e)

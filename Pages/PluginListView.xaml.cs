@@ -1,8 +1,10 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using JML.Bridge;
 using JML.Bridge.Dto;
+using JML.Controls;
 using JML.Infrastructure;
 
 namespace JML.Pages;
@@ -36,7 +38,35 @@ public partial class PluginListView : UserControl
         bool Enabled,
         IReadOnlyList<string> Dependents,
         string StatusCode,
-        string Reason);
+        string Reason)
+    {
+        // ---- PCL2 资源行展示字段（Controls\JmlControls.xaml 的 JmlResourceRowTemplate） ----
+
+        public string TitleText => Name;
+
+        public string SubtitleText =>
+            string.IsNullOrWhiteSpace(Version) ? string.Empty : "v" + Version;
+
+        /// <summary>标签只取状态短句（"已加载" / "已停用" / "加载失败"），原因留在状态栏。</summary>
+        public IReadOnlyList<string> Tags => [Status.Split('（')[0]];
+
+        public string DescriptionText => Description;
+
+        public IReadOnlyList<JmlResourceMetaItem> MetaItems =>
+            [new JmlResourceMetaItem(JmlResourceIcons.Source, $"插件 ID：{Id}")];
+
+        public IReadOnlyList<JmlResourceAction> Actions => [];
+
+        public ImageSource? Cover => null;
+
+        public Visibility LogoVisibility => Visibility.Visible;
+
+        public Visibility PlaceholderVisibility => Visibility.Collapsed;
+
+        public Visibility FailureVisibility => Visibility.Collapsed;
+
+        public Visibility CoverVisibility => Visibility.Collapsed;
+    }
 
     private readonly IPluginManageGateway _gateway;
     private bool _loadedOnce;

@@ -13,6 +13,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
 using JML.Bridge;
 using JML.Bridge.Dto;
+using JML.Controls;
 using JML.Infrastructure;
 
 namespace JML.Pages;
@@ -355,7 +356,13 @@ public partial class PluginPageHost : UserControl
 
         bool empty = page.Rows.Count == 0;
         GridRows.ItemsSource = page.Rows
-            .Select((row, index) => new PluginRowView(row, index))
+            .Select((row, index) => new PluginRowView(
+                row,
+                index,
+                page.Columns,
+                page.RowActions,
+                _title,
+                (actionId, view) => _ = RunActionAsync(actionId, BuildRowPayload(view))))
             .ToList();
         TextListEmpty.Text = string.IsNullOrWhiteSpace(page.EmptyText)
             ? "暂无数据"
@@ -363,6 +370,7 @@ public partial class PluginPageHost : UserControl
         TextListEmpty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         GridRows.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
         PanelListPager.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+        CardListPager.Visibility = PanelListPager.Visibility;
     }
 
     private void BuildListColumns(PluginListPageDto page)
@@ -370,49 +378,25 @@ public partial class PluginPageHost : UserControl
         GridRows.Columns.Clear();
         _coverColumn = null;
 
-        // 阶段 4-4 协议扩展：只要有一行带 thumb_book_id 就补最左侧封面列
-        // （40×56、圆角 3）。没有该字段的插件列结构完全不变。
-        if (page.Rows.Any(row =>
-                !string.IsNullOrEmpty(PluginPageRowFields.GetThumbBookId(row))))
+        // 所有 list 页面统一使用 PCL2 资源行模板（Controls\JmlControls.xaml）：
+        // 单列、无表头、行高 64。收藏夹行带 thumb_book_id 时显示 44×58 封面；
+        // 没有缩略图的行（下载历史等）显示 JML 六边形占位图标。
+        bool hasCover = page.Rows.Any(row =>
+            !string.IsNullOrEmpty(PluginPageRowFields.GetThumbBookId(row)));
+
+        var resourceColumn = new DataGridTemplateColumn
         {
-            _coverColumn = new DataGridTemplateColumn
-            {
-                Header = string.Empty,
-                CellTemplate = (DataTemplate)FindResource("PluginRowCoverTemplate"),
-                Width = new DataGridLength(56),
-                CanUserResize = false,
-                IsReadOnly = true,
-            };
-            GridRows.Columns.Add(_coverColumn);
-        }
+            Header = string.Empty,
+            CellTemplate = (DataTemplate)FindResource("JmlResourceRowTemplate"),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+            CanUserResize = false,
+            IsReadOnly = true,
+        };
+        GridRows.Columns.Add(resourceColumn);
 
-        foreach (PluginPageColumnDto column in page.Columns)
+        if (hasCover)
         {
-            if (string.IsNullOrEmpty(column.Key))
-            {
-                continue;
-            }
-
-            var textColumn = new DataGridTextColumn
-            {
-                Header = string.IsNullOrWhiteSpace(column.Title) ? column.Key : column.Title,
-                IsReadOnly = true,
-                Binding = new Binding($"[{column.Key}]")
-                {
-                    Mode = BindingMode.OneWay,
-                    Converter = JsonElementDisplayConverter.Instance,
-                },
-            };
-
-            textColumn.Width = column.Width is > 0
-                ? new DataGridLength(column.Width.Value)
-                : DataGridLength.Auto;
-            GridRows.Columns.Add(textColumn);
-        }
-
-        foreach (PluginPageRowActionDto action in page.RowActions)
-        {
-            AddRowActionColumn(action);
+            _coverColumn = resourceColumn;
         }
     }
 
@@ -483,6 +467,7 @@ public partial class PluginPageHost : UserControl
             PanelListFilters.Visibility = rendered > 0
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+            CardFilters.Visibility = PanelListFilters.Visibility;
         }
         finally
         {
@@ -658,46 +643,6 @@ public partial class PluginPageHost : UserControl
             LogSanitizer.Log($"插件页面封面解码失败：{ex.GetType().Name}: {ex.Message}");
             return null;
         }
-    }
-
-    /// <summary>
-    /// 行操作列：每行同一组按钮，点击时把该行原始 JSON 回传给 Python
-    /// （C# 不解释行字段，也不做可见性判断）。
-    /// </summary>
-    private void AddRowActionColumn(PluginPageRowActionDto action)
-    {
-        var panel = new FrameworkElementFactory(typeof(StackPanel));
-        panel.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
-
-        var button = new FrameworkElementFactory(typeof(Button));
-        button.SetValue(
-            FrameworkElement.StyleProperty,
-            FindResource(action.Primary ? "PrimaryButton" : "SecondaryButton"));
-        button.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 0, 0, 0));
-        button.SetValue(FrameworkElement.HeightProperty, 26.0);
-        button.SetValue(Button.MinWidthProperty, 56.0);
-        button.SetValue(ContentControl.ContentProperty, action.Title);
-        button.SetValue(FrameworkElement.TagProperty, action.Id);
-        button.AddHandler(Button.ClickEvent, new RoutedEventHandler(OnRowActionClick));
-
-        panel.AppendChild(button);
-        GridRows.Columns.Add(new DataGridTemplateColumn
-        {
-            Header = string.Empty,
-            CellTemplate = new DataTemplate { VisualTree = panel },
-            Width = DataGridLength.Auto,
-        });
-    }
-
-    private async void OnRowActionClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is not FrameworkElement element)
-        {
-            return;
-        }
-
-        string actionId = element.Tag as string ?? string.Empty;
-        await RunActionAsync(actionId, BuildRowPayload(element.DataContext as PluginRowView));
     }
 
     // ------------------------------------------------------------------
@@ -1815,22 +1760,47 @@ internal sealed record BrowserOpenRecord(
 
 /// <summary>
 /// 行数据视图：DataGrid 的绑定源。保留插件原始行（<see cref="Row"/>）供动作
-/// 回传，展示时用索引器取值（列 key 由 Python 决定）。
+/// 回传；展示字段（标题 / 副标题 / 标签 / 描述 / 底部信息）只从行 JSON 与
+/// Python 给的列定义里**读取**，不做业务判断（C# 不决定成功失败、不排序）。
 ///
 /// 封面状态（阶段 4-4 协议扩展：行内 <c>thumb_book_id</c>）也挂在这里：
 /// 取图成功显示图片、失败显示暗红底 X、未完成显示灰底占位；任何状态都只
-/// 影响本行，不影响列表渲染。
+/// 影响本行，不影响列表渲染。没有 thumb_book_id 的行显示 JML 占位图标。
 /// </summary>
 internal sealed class PluginRowView : INotifyPropertyChanged
 {
+    private readonly IReadOnlyList<PluginPageColumnDto> _columns;
     private ImageSource? _cover;
     private bool _coverFailed;
 
-    public PluginRowView(Dictionary<string, JsonElement> row, int index)
+    public PluginRowView(
+        Dictionary<string, JsonElement> row,
+        int index,
+        IReadOnlyList<PluginPageColumnDto> columns,
+        IReadOnlyList<PluginPageRowActionDto> actions,
+        string sourceTitle,
+        Action<string, PluginRowView> actionInvoked)
     {
         Row = row;
         Index = index;
+        _columns = columns;
         ThumbBookId = PluginPageRowFields.GetThumbBookId(row);
+
+        string bookId = ReadText("book_id");
+        string author = ReadText("author");
+        TitleText = BuildTitle();
+        SubtitleText = !string.IsNullOrWhiteSpace(author) ? author : bookId;
+        Tags = BuildTags();
+        DescriptionText = BuildDescription();
+        MetaItems = BuildMeta(bookId, sourceTitle);
+        Actions = actions
+            .Where(action =>
+                !string.IsNullOrWhiteSpace(action.Id)
+                && !string.IsNullOrWhiteSpace(action.Title))
+            .Select(action => new JmlResourceAction(
+                action.Title,
+                new JmlDelegateCommand(_ => actionInvoked(action.Id, this))))
+            .ToList();
     }
 
     /// <summary>插件原始行（回传给 plugin_page_action 的 row 字段）。</summary>
@@ -1841,16 +1811,40 @@ internal sealed class PluginRowView : INotifyPropertyChanged
 
     /// <summary>
     /// 行内可选封面编号（阶段 4-4 协议扩展）；空串 = 本行不显示封面，
-    /// 也不发任何取图请求。
+    /// 也不发任何取图请求（显示 JML 占位图标）。
     /// </summary>
     public string ThumbBookId { get; }
+
+    /// <summary>主标题（14px）：优先 title 字段，其次第一列的值。</summary>
+    public string TitleText { get; }
+
+    /// <summary>标题后的灰色副标题（12px）：作者；没有作者时用本子号。</summary>
+    public string SubtitleText { get; }
+
+    /// <summary>标签（11px）：结果 / 页数 / 收藏数等。</summary>
+    public IReadOnlyList<string> Tags { get; }
+
+    /// <summary>标签行右侧的灰色描述（12px）：输出路径等。</summary>
+    public string DescriptionText { get; }
+
+    /// <summary>底部信息行（时间 / 本子号 / 来源）。</summary>
+    public IReadOnlyList<JmlResourceMetaItem> MetaItems { get; }
+
+    /// <summary>行内操作按钮（收藏夹的详情 / 下载）；其余页面为空。</summary>
+    public IReadOnlyList<JmlResourceAction> Actions { get; }
 
     /// <summary>已解码的封面（未取到 / 失败时为 null）。</summary>
     public ImageSource? Cover => _cover;
 
-    /// <summary>灰底占位：尚未开始或正在取图。</summary>
+    /// <summary>没有缩略图的行显示 JML 六边形占位图标。</summary>
+    public Visibility LogoVisibility =>
+        string.IsNullOrEmpty(ThumbBookId) ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>灰底占位：带封面且尚未取到图。</summary>
     public Visibility PlaceholderVisibility =>
-        !CoverSettled ? Visibility.Visible : Visibility.Collapsed;
+        !string.IsNullOrEmpty(ThumbBookId) && !CoverSettled
+            ? Visibility.Visible
+            : Visibility.Collapsed;
 
     /// <summary>暗红底 X：取图或解码失败（与搜索页一致）。</summary>
     public Visibility FailureVisibility =>
@@ -1896,6 +1890,163 @@ internal sealed class PluginRowView : INotifyPropertyChanged
         Notify(nameof(PlaceholderVisibility));
         Notify(nameof(FailureVisibility));
         Notify(nameof(CoverSettled));
+    }
+
+    private string BuildTitle()
+    {
+        string title = ReadText("title");
+        if (title.Length > 0)
+        {
+            return title;
+        }
+
+        foreach (PluginPageColumnDto column in _columns)
+        {
+            if (string.IsNullOrWhiteSpace(column.Key))
+            {
+                continue;
+            }
+
+            string value = ReadText(column.Key);
+            if (value.Length > 0)
+            {
+                return value;
+            }
+        }
+
+        return ReadText("book_id");
+    }
+
+    private List<string> BuildTags()
+    {
+        var tags = new List<string>();
+
+        string result = ReadText("result");
+        if (result.Length > 0)
+        {
+            tags.Add(result);
+        }
+
+        AddCountTag(tags, "page_count", "页数");
+        AddCountTag(tags, "click_count", "收藏数");
+
+        // 未识别的列仍然按"列名 值"补成标签（最多 3 个），避免插件自定义字段丢失。
+        var used = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "title", "author", "book_id", "result", "page_count", "click_count",
+            "time", "updated", "path", "description", "thumb_book_id",
+            "subtitle", "tags", "meta",
+        };
+        foreach (PluginPageColumnDto column in _columns)
+        {
+            if (tags.Count >= 3)
+            {
+                break;
+            }
+
+            if (string.IsNullOrWhiteSpace(column.Key) || used.Contains(column.Key))
+            {
+                continue;
+            }
+
+            string value = ReadText(column.Key);
+            if (value.Length > 0)
+            {
+                tags.Add($"{ColumnLabel(column)} {value}");
+            }
+        }
+
+        return tags;
+    }
+
+    private void AddCountTag(List<string> tags, string key, string fallbackLabel)
+    {
+        string value = ReadText(key);
+        if (value.Length == 0 || value == "0")
+        {
+            return;
+        }
+
+        PluginPageColumnDto? column = _columns.FirstOrDefault(
+            item => string.Equals(item.Key, key, StringComparison.Ordinal));
+        string label = column is null ? fallbackLabel : ColumnLabel(column);
+        tags.Add($"{label} {value}");
+    }
+
+    private string BuildDescription()
+    {
+        string description = ReadText("description");
+        return description.Length > 0 ? description : ReadText("path");
+    }
+
+    private List<JmlResourceMetaItem> BuildMeta(string bookId, string sourceTitle)
+    {
+        var meta = new List<JmlResourceMetaItem>();
+
+        string updated = ReadText("updated");
+        if (updated.Length > 0)
+        {
+            meta.Add(new JmlResourceMetaItem(
+                JmlResourceIcons.Time, $"更新 {FormatTime(updated)}"));
+        }
+
+        string time = ReadText("time");
+        if (time.Length > 0)
+        {
+            meta.Add(new JmlResourceMetaItem(
+                JmlResourceIcons.Time, $"下载 {FormatTime(time)}"));
+        }
+
+        if (bookId.Length > 0
+            && !string.Equals(bookId, SubtitleText, StringComparison.Ordinal))
+        {
+            meta.Add(new JmlResourceMetaItem(
+                JmlResourceIcons.Version, $"本子号 {bookId}"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(sourceTitle))
+        {
+            meta.Add(new JmlResourceMetaItem(JmlResourceIcons.Source, sourceTitle));
+        }
+
+        return meta;
+    }
+
+    private string ReadText(string key)
+    {
+        if (!Row.TryGetValue(key, out JsonElement element))
+        {
+            return string.Empty;
+        }
+
+        return element.ValueKind switch
+        {
+            JsonValueKind.String => (element.GetString() ?? string.Empty).Trim(),
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => string.Empty,
+        };
+    }
+
+    private static string ColumnLabel(PluginPageColumnDto column) =>
+        string.IsNullOrWhiteSpace(column.Title) ? column.Key : column.Title;
+
+    private static string FormatTime(string value)
+    {
+        if (!DateTimeOffset.TryParse(
+                value,
+                CultureInfo.CurrentCulture,
+                DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeLocal,
+                out DateTimeOffset parsed))
+        {
+            return value;
+        }
+
+        // 收藏夹的 updated 可能只有日期：不要补出 "00:00" 这种噪声。
+        return parsed.TimeOfDay == TimeSpan.Zero && value.Length <= 10
+            ? parsed.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+            : parsed.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     }
 
     private void Notify(string propertyName)

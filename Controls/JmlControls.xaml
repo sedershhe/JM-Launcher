@@ -468,6 +468,214 @@
          不属于样式差异，也不影响高度。 -->
     <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}" />
 
+    <!-- 资源行没有封面时的占位图标（JML 蓝色六边形）。
+         只解码到 80px，避免每行 1024px 原图占内存。 -->
+    <BitmapImage x:Key="JmlResourceLogo"
+                 UriSource="pack://application:,,,/JML;component/Assets/JML_logo_20261018_v1.0.png"
+                 DecodePixelWidth="80"
+                 CacheOption="OnLoad" />
+
+    <!-- ========== PCL2 资源列表行（MyResourceItem） ==========
+         参数来源：PCL-main\Plain Craft Launcher 2\Pages\PageDownload\Resource\MyResourceItem.xaml
+           行高 64；列 7 / 44（竖版封面，用户选定）/ 8 / * / Auto；
+           标题 14px ColorBrush1、副标题 12px ColorBrushGray1 40%；
+           标签 11px #868686 底 #11000000 圆角 3；描述 12px ColorBrushGray3；
+           底部信息行 11px 图标 + 12px ColorBrushGray4；
+           悬停 ColorBrush7 底 + ColorBrush6 边框（PCL2 120ms，这里用静态触发器）。
+         绑定契约（三个页面共用，字段同名即可，不要求共同基类）：
+           TitleText / SubtitleText / Tags / DescriptionText / MetaItems / Actions /
+           Cover / CoverVisibility / PlaceholderVisibility / FailureVisibility / LogoVisibility
+         没有封面的行把 LogoVisibility 设为 Visible，显示 JML 六边形图标。 -->
+    <DataTemplate x:Key="JmlResourceRowTemplate">
+        <Grid x:Name="Root"
+              Height="64"
+              Background="Transparent"
+              SnapsToDevicePixels="True">
+            <Border x:Name="RowBack"
+                    CornerRadius="3"
+                    BorderThickness="1"
+                    Background="Transparent"
+                    BorderBrush="Transparent"
+                    IsHitTestVisible="False" />
+
+            <Grid Margin="7,0,6,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="44" />
+                    <ColumnDefinition Width="8" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 封面 / 占位图标：44×58 竖版、圆角 6 -->
+                <Grid Grid.Column="0" Width="44" Height="58" VerticalAlignment="Center">
+                    <Border Background="{DynamicResource ColorBrushGray7}"
+                            CornerRadius="6"
+                            Visibility="{Binding PlaceholderVisibility}" />
+
+                    <Border Background="{DynamicResource ColorBrushRedBack}"
+                            CornerRadius="6"
+                            Visibility="{Binding FailureVisibility}">
+                        <TextBlock Text="X"
+                                   FontSize="20"
+                                   FontWeight="Bold"
+                                   Foreground="{DynamicResource ColorBrushRedLight}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </Border>
+
+                    <Border Width="44"
+                            Height="44"
+                            Background="#EEF4FF"
+                            CornerRadius="6"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Visibility="{Binding LogoVisibility}">
+                        <Image Source="{StaticResource JmlResourceLogo}"
+                               Width="40" Height="40"
+                               Stretch="Uniform"
+                               RenderOptions.BitmapScalingMode="HighQuality" />
+                    </Border>
+
+                    <Border CornerRadius="6"
+                            Visibility="{Binding CoverVisibility}">
+                        <Border.Clip>
+                            <RectangleGeometry Rect="0,0,44,58" RadiusX="6" RadiusY="6" />
+                        </Border.Clip>
+                        <Image Source="{Binding Cover}"
+                               Stretch="UniformToFill"
+                               RenderOptions.BitmapScalingMode="HighQuality" />
+                    </Border>
+                </Grid>
+
+                <!-- 标题行 / 标签 + 描述 / 底部信息行（PCL2 的 17 / 18 / 16 三行） -->
+                <Grid Grid.Column="2" Margin="0,0,4,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="17" />
+                        <RowDefinition Height="18" />
+                        <RowDefinition Height="16" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="1" VerticalAlignment="Bottom" Margin="0,0,0,1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding TitleText}"
+                                   FontSize="14"
+                                   Foreground="{DynamicResource ColorBrush1}"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Bottom" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding SubtitleText}"
+                                   Margin="5,0,0,1"
+                                   MaxWidth="260"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource ColorBrushGray1}"
+                                   Opacity="0.4"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Bottom" />
+                    </Grid>
+
+                    <Grid Grid.Row="2" VerticalAlignment="Bottom" Margin="0,0,0,1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <ItemsControl ItemsSource="{Binding Tags}" VerticalAlignment="Bottom">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#11000000"
+                                            CornerRadius="3"
+                                            Padding="3,1"
+                                            Margin="0,0,3,0"
+                                            SnapsToDevicePixels="True">
+                                        <TextBlock Text="{Binding}"
+                                                   FontSize="11"
+                                                   Foreground="#868686" />
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding DescriptionText}"
+                                   Margin="4,0,4,0"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource ColorBrushGray3}"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Bottom"
+                                   ToolTip="{Binding DescriptionText}" />
+                    </Grid>
+
+                    <ItemsControl Grid.Row="3"
+                                  ItemsSource="{Binding MetaItems}"
+                                  VerticalAlignment="Bottom"
+                                  Margin="0,0,0,1">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
+                                    <Path Data="{Binding Icon}"
+                                          Fill="{DynamicResource ColorBrushGray4}"
+                                          Height="11"
+                                          Stretch="Uniform"
+                                          Margin="0,0,4,0"
+                                          VerticalAlignment="Center" />
+                                    <TextBlock Text="{Binding Text}"
+                                               FontSize="12"
+                                               Foreground="{DynamicResource ColorBrushGray4}"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Grid>
+
+                <!-- 行内操作（收藏夹的详情 / 下载；其余列表为空） -->
+                <ItemsControl Grid.Column="3"
+                              ItemsSource="{Binding Actions}"
+                              VerticalAlignment="Center"
+                              Margin="8,0,0,0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Button Content="{Binding Title}"
+                                    Command="{Binding Command}"
+                                    Style="{StaticResource SecondaryButton}"
+                                    Height="26"
+                                    MinWidth="56"
+                                    Padding="10,0"
+                                    FontSize="12"
+                                    Margin="6,0,0,0" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+        </Grid>
+        <DataTemplate.Triggers>
+            <Trigger SourceName="Root" Property="IsMouseOver" Value="True">
+                <Setter TargetName="RowBack" Property="Background"
+                        Value="{DynamicResource ColorBrush7}" />
+                <Setter TargetName="RowBack" Property="BorderBrush"
+                        Value="{DynamicResource ColorBrush6}" />
+            </Trigger>
+        </DataTemplate.Triggers>
+    </DataTemplate>
+
     <!-- ========== 兜底：没写 Style 的 Button 统一按 35 高次按钮 ==========
          PythonSetupPage 的「重新检测」「进入主界面」原来没写 Style，落到外部库的隐式
          PlainButton：透明底、Padding=14,8、高度随内容，与其它页的次按钮不一致（用户实测“字号不统一”）。

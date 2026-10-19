@@ -4,7 +4,8 @@
     本页是**模板渲染器**，不含任何业务逻辑：模板类型、页面标题、列定义、
     行数据、文件清单、状态文案、动作按钮、失败判断全部来自 Python
     （plugin_page_load / plugin_page_action），C# 只按 template 选控件：
-      list    → DataGrid（列 = columns，行 = rows，行操作 = row_actions）+ 分页 + 空态
+      list    → DataGrid（单列 PCL2 资源行：封面 / 标题 / 标签 / 底部信息 / 行按钮）
+                + 分页 + 空态
       browser → 左侧文件列表 + 右侧图片区（plugin_page_image 原始 bytes）+ 图片分页 + 返回
       action  → 文件列表 + actions 动作按钮 + status_text + 刷新
     插件**不允许**返回任意 XAML / 界面描述，未知模板只显示错误文案。
@@ -15,38 +16,10 @@
 <UserControl x:Class="JML.Pages.PluginPageHost"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ctl="clr-namespace:JML.Controls"
              Focusable="True"
              KeyDown="Host_KeyDown">
-    <UserControl.Resources>
-        <!--
-            list 模板的可选封面列（阶段 4-4 协议扩展：行内 thumb_book_id）。
-            C# 只在「至少一行带 thumb_book_id」时插入这一列；封面字节来自
-            SearchBridge.FetchCover，失败显示暗红底 X（与搜索页一致的占位语言）。
-            40×56、圆角 3；绑定的是 PluginRowView 的展示状态，不含业务判断。
-        -->
-        <DataTemplate x:Key="PluginRowCoverTemplate">
-            <Grid Width="40" Height="56" Margin="8,2" VerticalAlignment="Center">
-                <Border Background="{DynamicResource ColorBrushGray7}"
-                        CornerRadius="3"
-                        Visibility="{Binding PlaceholderVisibility}" />
-                <Border Background="{DynamicResource ColorBrushRedBack}"
-                        CornerRadius="3"
-                        Visibility="{Binding FailureVisibility}">
-                    <TextBlock Text="X"
-                               FontSize="18"
-                               FontWeight="Bold"
-                               Foreground="{DynamicResource ColorBrushRedLight}"
-                               HorizontalAlignment="Center"
-                               VerticalAlignment="Center" />
-                </Border>
-                <Image Source="{Binding Cover}"
-                       Stretch="UniformToFill"
-                       Visibility="{Binding CoverVisibility}" />
-            </Grid>
-        </DataTemplate>
-    </UserControl.Resources>
-
-    <Grid Margin="16">
+    <Grid Margin="25,15,25,25">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -68,7 +41,9 @@
 
         <Grid Grid.Row="1">
 
-            <!-- ================= list 模板 ================= -->
+            <!-- ================= list 模板 =================
+                 列表本身使用共享的 PCL2 资源行模板（Controls\JmlControls.xaml），
+                 行高 64、无表头；收藏夹行带 44×58 封面，没有缩略图的行显示 JML 图标。 -->
             <Grid x:Name="PanelList" Visibility="Collapsed">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -78,55 +53,78 @@
 
                 <!-- 可选筛选下拉（阶段 4-4：data.filters；选项与当前值全部来自
                      Python，C# 只按用户选择把 {page:1, <key>: <value>} 回传） -->
-                <StackPanel x:Name="PanelListFilters"
-                            Grid.Row="0"
-                            Orientation="Horizontal"
-                            Margin="0,0,0,8"
-                            Visibility="Collapsed" />
+                <ctl:JmlCard x:Name="CardFilters"
+                             Grid.Row="0"
+                             Padding="16,8"
+                             Margin="0,0,0,8"
+                             Visibility="Collapsed">
+                    <StackPanel x:Name="PanelListFilters"
+                                Orientation="Horizontal" />
+                </ctl:JmlCard>
 
-                <DataGrid x:Name="GridRows"
-                          Grid.Row="1"
-                          Style="{StaticResource JmlDataGrid}"
-                          AutoGenerateColumns="False"
-                          IsReadOnly="True"
-                          CanUserAddRows="False"
-                          CanUserDeleteRows="False"
-                          CanUserSortColumns="False"
-                          CanUserReorderColumns="False"
-                          SelectionMode="Single"
-                          HeadersVisibility="Column"
-                          MouseDoubleClick="GridRows_MouseDoubleClick" />
+                <ctl:JmlCard Grid.Row="1" Padding="12" VerticalAlignment="Stretch">
+                    <Grid>
+                        <DataGrid x:Name="GridRows"
+                                  Style="{StaticResource JmlDataGrid}"
+                                  AutoGenerateColumns="False"
+                                  IsReadOnly="True"
+                                  CanUserAddRows="False"
+                                  CanUserDeleteRows="False"
+                                  CanUserSortColumns="False"
+                                  CanUserReorderColumns="False"
+                                  CanUserResizeColumns="False"
+                                  SelectionMode="Single"
+                                  HeadersVisibility="None"
+                                  GridLinesVisibility="None"
+                                  RowHeight="64"
+                                  Background="Transparent"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                  MouseDoubleClick="GridRows_MouseDoubleClick">
+                            <DataGrid.CellStyle>
+                                <Style TargetType="DataGridCell"
+                                       BasedOn="{StaticResource PlainDataGridCell}">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="BorderThickness" Value="0" />
+                                    <Setter Property="Background" Value="Transparent" />
+                                </Style>
+                            </DataGrid.CellStyle>
+                        </DataGrid>
 
-                <TextBlock x:Name="TextListEmpty"
-                           Grid.Row="1"
-                           Visibility="Collapsed"
-                           HorizontalAlignment="Center"
-                           VerticalAlignment="Center"
-                           FontSize="13"
-                           Foreground="{DynamicResource ColorBrushGray3}"
-                           TextWrapping="Wrap" />
+                        <TextBlock x:Name="TextListEmpty"
+                                   Visibility="Collapsed"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource ColorBrushGray3}"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+                </ctl:JmlCard>
 
-                <StackPanel x:Name="PanelListPager"
-                            Grid.Row="2"
-                            Orientation="Horizontal"
-                            HorizontalAlignment="Right"
-                            Margin="0,8,0,0">
-                    <Button x:Name="BtnListPrev"
-                            Content="上一页"
-                            Style="{StaticResource SecondaryButton}"
-                            MinWidth="76"
-                            Click="BtnListPrev_Click" />
-                    <TextBlock x:Name="TextListPage"
-                               VerticalAlignment="Center"
-                               Margin="12,0"
-                               FontSize="13"
-                               Foreground="{DynamicResource ColorBrushGray3}" />
-                    <Button x:Name="BtnListNext"
-                            Content="下一页"
-                            Style="{StaticResource SecondaryButton}"
-                            MinWidth="76"
-                            Click="BtnListNext_Click" />
-                </StackPanel>
+                <ctl:JmlCard x:Name="CardListPager"
+                             Grid.Row="2"
+                             Margin="0,8,0,0"
+                             Padding="10,5"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center">
+                    <StackPanel x:Name="PanelListPager"
+                                Orientation="Horizontal">
+                        <Button x:Name="BtnListPrev"
+                                Content="上一页"
+                                Style="{StaticResource SecondaryButton}"
+                                MinWidth="76"
+                                Click="BtnListPrev_Click" />
+                        <TextBlock x:Name="TextListPage"
+                                   VerticalAlignment="Center"
+                                   Margin="12,0"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource ColorBrushGray3}" />
+                        <Button x:Name="BtnListNext"
+                                Content="下一页"
+                                Style="{StaticResource SecondaryButton}"
+                                MinWidth="76"
+                                Click="BtnListNext_Click" />
+                    </StackPanel>
+                </ctl:JmlCard>
             </Grid>
 
             <!-- ================= browser 模板 ================= -->

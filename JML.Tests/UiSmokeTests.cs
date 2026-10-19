@@ -931,7 +931,7 @@ public class UiSmokeTests
 
     /// <summary>
     /// 插件页 PCL2 观感：左栏底 #F1FFFFFF、右侧 4 宽渐变阴影（黑 4%→透明）；
-    /// DataGrid 无粗边框、行高 36、表头高 34；操作按钮统一 35 高次按钮。
+    /// 插件管理列表使用 PCL2 资源行（行高 64、无表头、无粗边框）；操作按钮统一 35 高次按钮。
     /// </summary>
     [Fact]
     public void PluginPage_UsesPclSidebarAndDataGrid()
@@ -956,8 +956,8 @@ public class UiSmokeTests
             var grid = Find<DataGrid>(list, "GridPlugins");
             Assert.Same(Application.Current.FindResource("JmlDataGrid"), grid.Style);
             Assert.Equal(0, grid.BorderThickness.Left);
-            Assert.Equal(36, grid.RowHeight);
-            Assert.Equal(34, grid.ColumnHeaderHeight);
+            Assert.Equal(64, grid.RowHeight);
+            Assert.Equal(DataGridHeadersVisibility.None, grid.HeadersVisibility);
 
             foreach (string name in new[] { "BtnEnable", "BtnDisable", "BtnRescan" })
             {

@@ -40,6 +40,9 @@
   <ItemGroup>
     <!-- 窗口图标作为 WPF 资源嵌入程序集：MainWindow.xaml 的 Icon 指向它。 -->
     <Resource Include="Assets\icon.ico" />
+    <!-- 资源列表行的插件占位图标（插件功能 / 插件管理 / 下载历史共用）：
+         使用 1024px 的原始 PNG，显示时按 40×40 缩放，比 ico 多尺寸帧清晰。 -->
+    <Resource Include="Assets\JML_logo_20261018_v1.0.png" />
   </ItemGroup>
 
   <ItemGroup>

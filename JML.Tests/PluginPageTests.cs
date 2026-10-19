@@ -363,8 +363,10 @@ public class PluginPageTests
             Assert.Equal(Visibility.Collapsed, Find<Grid>(host, "PanelAction").Visibility);
 
             var grid = Find<DataGrid>(host, "GridRows");
-            Assert.Equal(3, grid.Columns.Count); // 2 列 + 1 个行操作列
+            // 单列资源行模板（PCL2 样式），行操作按钮在模板内部，不再单独占列
+            Assert.Single(grid.Columns);
             Assert.Equal(2, grid.Items.Count);
+            Assert.Single(Assert.IsType<PluginRowView>(grid.Items[0]).Actions);
             Assert.Equal("第 2 页 / 共 5 页", Find<TextBlock>(host, "TextListPage").Text);
             Assert.True(Find<Button>(host, "BtnListPrev").IsEnabled);
             Assert.True(Find<Button>(host, "BtnListNext").IsEnabled);
@@ -390,19 +392,20 @@ public class PluginPageTests
                 page: 1, totalPages: 1, rows: 2, rowActions: 0, emptyText: ""));
 
             var grid = Find<DataGrid>(host, "GridRows");
-            var panel = (FrameworkElement)grid.Parent;
-            panel.Measure(new Size(900, 600));
-            panel.Arrange(new Rect(0, 0, 900, 600));
-            panel.UpdateLayout();
-            grid.UpdateLayout();
+            LayoutList(host);
 
             object firstRow = grid.Items[0];
-            var firstCell = grid.Columns[0].GetCellContent(firstRow) as TextBlock;
-            var secondCell = grid.Columns[1].GetCellContent(firstRow) as TextBlock;
-            Assert.NotNull(firstCell);
-            Assert.NotNull(secondCell);
-            Assert.Equal("2026-10-01", firstCell!.Text);
-            Assert.Equal("100", secondCell!.Text);
+            var cell = grid.Columns[0].GetCellContent(firstRow) as FrameworkElement;
+            Assert.NotNull(cell);
+            cell!.UpdateLayout();
+
+            // 资源行把第一列当标题、book_id 当副标题（不再有独立的文本单元格）
+            Assert.NotNull(FindVisualChild<TextBlock>(
+                cell,
+                block => block.Text == "2026-10-01" && block.Visibility == Visibility.Visible));
+            Assert.NotNull(FindVisualChild<TextBlock>(
+                cell,
+                block => block.Text == "100" && block.Visibility == Visibility.Visible));
         });
     }
 
@@ -506,21 +509,43 @@ public class PluginPageTests
         {
             var host = NewHost(new FakePluginPageGateway());
 
-            // 旧插件：行内没有 thumb_book_id → 不出现封面列（列数完全不变）
+            // 旧插件：行内没有 thumb_book_id → 不显示封面（但仍是单列资源行模板）
             host.ApplyLoad(ListResult(
                 page: 1, totalPages: 1, rows: 2, rowActions: 1, emptyText: ""));
             var legacyGrid = Find<DataGrid>(host, "GridRows");
             Assert.False(host.HasCoverColumn);
-            Assert.Equal(3, legacyGrid.Columns.Count); // 2 文本列 + 1 行动作列
+            Assert.Single(legacyGrid.Columns);
 
-            // 收藏夹：行内带 thumb_book_id → 最左侧多出 40×56 封面列
+            // 收藏夹：行内带 thumb_book_id → 同一列内显示 44×58 封面
             host.ApplyLoad(CoverListResult(new[] { "123", "456" }, "detail"));
             var grid = Find<DataGrid>(host, "GridRows");
             Assert.True(host.HasCoverColumn);
-            Assert.Equal(5, grid.Columns.Count); // 封面 + 2 文本列 + 2 行动作列
+            Assert.Single(grid.Columns);
             Assert.IsType<DataGridTemplateColumn>(grid.Columns[0]);
-            Assert.Equal(56, grid.Columns[0].Width.Value);
+            Assert.Equal(DataGridLengthUnitType.Star, grid.Columns[0].Width.UnitType);
             Assert.Equal(string.Empty, grid.Columns[0].Header as string);
+        });
+    }
+
+    [Fact]
+    public void Host_ListTemplate_MapsRowsToPclResourceFields()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(CoverListResult(new[] { "123" }, "detail"));
+
+            var grid = Find<DataGrid>(host, "GridRows");
+            var row = Assert.IsType<PluginRowView>(grid.Items[0]);
+
+            Assert.Equal("标题1", row.TitleText);
+            Assert.Equal("作者1", row.SubtitleText);
+            Assert.Equal(new[] { "页数 10", "收藏数 20" }, row.Tags);
+            Assert.Contains(row.MetaItems, item => item.Text == "本子号 123");
+            Assert.Contains(row.MetaItems, item => item.Text == "收藏夹");
+            Assert.Equal(2, row.Actions.Count);
+            Assert.Equal(Visibility.Collapsed, row.LogoVisibility);
+            Assert.Equal(Visibility.Visible, row.PlaceholderVisibility);
         });
     }
 

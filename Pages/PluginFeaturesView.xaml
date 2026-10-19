@@ -7,11 +7,16 @@
       - 声明多个页面 → 先在本视图内显示页面选择列表，再进入；
       - 未声明页面 → 状态行给出明确提示。
     进入功能页仍走 MainWindow 的内页机制（NavigationStack.PushInner）。
+
+    列表外观（2026-10-19 用户要求）：与 PCL2 Mod / 整合包搜索列表一致，
+    统一使用 Controls\JmlControls.xaml 的 JmlResourceRowTemplate；
+    没有封面图的行显示 JML 六边形占位图标。
 -->
 <UserControl x:Class="JML.Pages.PluginFeaturesView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid Margin="16">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ctl="clr-namespace:JML.Controls">
+    <Grid Margin="25,15,25,25">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
@@ -20,56 +25,62 @@
         <Grid>
             <!-- 插件列表 -->
             <DockPanel x:Name="PanelPlugins">
-                <TextBlock DockPanel.Dock="Top"
-                           Text="已启用插件（双击进入功能页）"
-                           FontSize="13"
-                           FontWeight="SemiBold"
-                           Margin="0,0,0,6"
-                           Foreground="{DynamicResource ColorBrush1}" />
-                <ListBox x:Name="FeatureList"
-                         MouseDoubleClick="FeatureList_MouseDoubleClick">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Margin="4,2">
-                                <TextBlock Text="{Binding PluginName}" FontSize="14" FontWeight="SemiBold" />
-                                <TextBlock Text="{Binding Summary}"
-                                           FontSize="12"
-                                           Foreground="{DynamicResource ColorBrushGray3}" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                <ctl:JmlCard Header="已启用插件（双击进入功能页）"
+                             Padding="12,40,12,12"
+                             VerticalAlignment="Stretch">
+                    <ListBox x:Name="FeatureList"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             HorizontalContentAlignment="Stretch"
+                             ItemTemplate="{StaticResource JmlResourceRowTemplate}"
+                             MouseDoubleClick="FeatureList_MouseDoubleClick">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem"
+                                   BasedOn="{StaticResource PlainListBoxItem}">
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                    </ListBox>
+                </ctl:JmlCard>
             </DockPanel>
 
             <!-- 多页面插件的页面选择列表 -->
             <DockPanel x:Name="PanelPages" Visibility="Collapsed">
-                <StackPanel DockPanel.Dock="Top"
-                            Orientation="Horizontal"
-                            Margin="0,0,0,6">
-                    <Button x:Name="BtnPagesBack"
-                            Content="返回插件列表"
-                            Style="{StaticResource SecondaryButton}"
-                            MinWidth="110"
-                            Click="BtnPagesBack_Click" />
-                    <TextBlock x:Name="TextPagesTitle"
-                               VerticalAlignment="Center"
-                               Margin="12,0"
-                               FontSize="13"
-                               Foreground="{DynamicResource ColorBrushGray3}" />
-                </StackPanel>
-                <ListBox x:Name="PageList"
-                         MouseDoubleClick="PageList_MouseDoubleClick">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Margin="4,2">
-                                <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="SemiBold" />
-                                <TextBlock Text="{Binding Template}"
-                                           FontSize="12"
-                                           Foreground="{DynamicResource ColorBrushGray3}" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                <ctl:JmlCard Padding="12" VerticalAlignment="Stretch">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Top"
+                                    Orientation="Horizontal"
+                                    Margin="0,0,0,8">
+                            <Button x:Name="BtnPagesBack"
+                                    Content="返回插件列表"
+                                    Style="{StaticResource SecondaryButton}"
+                                    MinWidth="110"
+                                    Click="BtnPagesBack_Click" />
+                            <TextBlock x:Name="TextPagesTitle"
+                                       VerticalAlignment="Center"
+                                       Margin="12,0"
+                                       FontSize="13"
+                                       Foreground="{DynamicResource ColorBrushGray3}" />
+                        </StackPanel>
+                        <ListBox x:Name="PageList"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 HorizontalContentAlignment="Stretch"
+                                 ItemTemplate="{StaticResource JmlResourceRowTemplate}"
+                                 MouseDoubleClick="PageList_MouseDoubleClick">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem"
+                                       BasedOn="{StaticResource PlainListBoxItem}">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                        </ListBox>
+                    </DockPanel>
+                </ctl:JmlCard>
             </DockPanel>
         </Grid>
 
