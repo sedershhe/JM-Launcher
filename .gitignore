@@ -44,3 +44,5 @@ _pt_tmp/
 pip-*/
 pytest-cache-files-*/
 test_config_probe.py
+# 发布产物（可重建，不入库）
+dist/

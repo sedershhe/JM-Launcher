@@ -1,9 +1,0 @@
-{
-  "keep_count": {
-    "type": "integer",
-    "default": 200,
-    "min": 10,
-    "max": 10000,
-    "label": "保留条数"
-  }
-}
