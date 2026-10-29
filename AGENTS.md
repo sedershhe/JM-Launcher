@@ -8,6 +8,13 @@
 ##  项目概览
 - 本项目直接继承自"D:\py_lj"项目的jm4.0插件化版本以及已经开发的几个主要插件,目标是基于C#/NET栈和本地"D:\vscode\Project\PCLUI\PlainToolkit.UI-main"UI素材仓库,"D:\vscode\Project\PCLUI\PCL-main"仓库,把原有的GUI界面重做为PCL2的界面风格,后端逻辑完全不变,保留python原有逻辑,使用pythonnet做前后端桥接,C#层不做任何功能业务逻辑.
 
+##  插件协议规范
+- 地址：`plugin_sdk/20261029_JML插件协议规范_v1.0.md`
+- 新增或修改插件前先读这份文档，它覆盖 `plugin.json` 字段、`setup(ctx)` 接口、四种页面模板的 JSON 字段、服务与事件、错误处理
+- 空白模板在 `plugin_sdk/template/`（复制后改三处身份信息即可）；自检工具是 `plugin_sdk/loader.py`，支持 `check` / `run` / `page` / `action` 四个子命令，不启动主程序就能校验清单、装配插件、试跑页面与动作，`run plugins` 可一次装配全部插件
+- 改动宿主的清单校验、页面模板、服务注册或事件定义时，必须同步更新该文档；不兼容变更要提升 `api_version`
+- 现有四个插件可作参考实现：`plugins/download_history/`、`plugins/favorites/`、`plugins/zip_browser/`、`plugins/zip_web/`
+
 ##  文件管理规则
 - **文件命名**：生成文件时，命名要包含**时间 + 主题 + 版本**（例如 20260731_漫画下载器_v1.0.py）
 - **项目内文件**：项目源文件夹保持整洁，只放核心代码和配置文件

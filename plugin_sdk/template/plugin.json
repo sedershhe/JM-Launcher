@@ -1,0 +1,15 @@
+{
+  "id": "my_plugin",
+  "name": "我的插件",
+  "version": "0.1.0",
+  "api_version": 1,
+  "description": "一句话说明这个插件做什么。",
+  "entry": "main.py",
+  "dependencies": { "plugins": [] },
+  "services": { "provides": [], "requires": [] },
+  "pages": [
+    { "id": "my_plugin.main", "title": "我的页面", "template": "list" }
+  ],
+  "config": { "schema": "config.schema.json" },
+  "development_sample": true
+}

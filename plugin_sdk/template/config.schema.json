@@ -1,0 +1,21 @@
+{
+  "page_size": {
+    "type": "integer",
+    "default": 20,
+    "min": 5,
+    "max": 200,
+    "label": "每页条数",
+    "ui": "number"
+  },
+  "show_empty_tip": {
+    "type": "boolean",
+    "default": true,
+    "label": "列表为空时显示提示"
+  },
+  "source_dir": {
+    "type": "string",
+    "default": "",
+    "label": "数据目录",
+    "ui": "path"
+  }
+}
