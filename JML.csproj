@@ -16,8 +16,8 @@
     <Product>JM Launcher</Product>
     <Company>JML</Company>
     <Description>JM Launcher — 禁漫下载/搜索/浏览工具</Description>
-    <Version>1.0.0</Version>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.1.0</Version>
+    <FileVersion>1.1.0.0</FileVersion>
 
     <!-- 默认编译项排除临时/证据目录：按项目规则，Draw\ 与 Delete\ 专门存放临时文件与
          验收证据，而 MSBuild 的默认 glob 不看 .gitignore。子代理在 Draw\ 或 Delete\ 下留过
