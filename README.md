@@ -1,12 +1,12 @@
 # JM Launcher
 
-JM-Launcher 基于 python 库 jmcomic 开发的可视化桌面程序。
+JM-Launcher 是基于 python 库 jmcomic 开发的可视化桌面程序。
 
-本项目后端采用 python 开发，核心库来自 https://github.com/hect0x7/JMComic-Crawler-Python ，前端界面采用 https://github.com/PCL-Community/PCL-CE https://github.com/Meloong-Git/PCL 提供的控件和动画方案，衷心感谢社区开源大佬的贡献。
+本项目后端采用 python 开发，核心库来自 https://github.com/hect0x7/JMComic-Crawler-Python ，前端界面采用 https://github.com/PCL-Community/PCL-CE 和 https://github.com/Meloong-Git/PCL 提供的控件和动画方案，衷心感谢社区开源大佬的贡献。
 
-注意：本项目为黑盒开发，技术细节由 ai 辅助完成，可能有未知的边界条件未覆盖，导致未知的 bug。
+注意：本项目为黑盒开发，技术细节由 ai 辅助完成，可能有未知的边界条件未覆盖，进而导致未知的 bug。
 
-简介：如你所见，这个程序由简单的几个功能组成，分别是下载、搜索、插件、登录。其中内置了四个插件：**收藏夹**：你可以登录后打开这个插件浏览你账号中的收藏夹；**下载历史**：你可以浏览使用本程序的下载历史；**zip 浏览**：你可以指定某个文件夹，然后浏览这个文件夹内打包为 zip 的本子（该插件已经废弃，作为前置存在）；**zip 网页浏览**：你可以指定某个文件夹，唤起本地浏览器进程畅快浏览本地打包为 zip 的本子，需要上一个插件作为前置。
+简介：如你所见，这个程序由简单的几个功能组成，分别是下载、搜索、插件、登录。其中内置了四个插件：**收藏夹**：你可以登录后打开这个插件浏览你账号中的收藏夹；**下载历史**：你可以浏览使用本程序的下载历史；**zip 浏览**：你可以指定某个文件夹，然后浏览这个文件夹内打包为 zip 的本子（该插件已经废弃，作为前置存在）；**zip 网页浏览**：你可以指定某个文件夹，唤起本地浏览器进程畅快浏览本地打包为 zip 的本子，需要上一个插件作为前置。**(注意,此处zip指本程序自动打包的纯.webp压缩包,其余情况未测试)**
 
 \---
 
@@ -22,7 +22,7 @@ JM-Launcher 基于 python 库 jmcomic 开发的可视化桌面程序。
 |.NET 运行时|**.NET 10.0（net10.0-windows）桌面运行时**|
 |架构|x64（64 位）|
 
-> 便携版为\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*框架依赖\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*发布，不含自带运行时，需本机已安装 .NET 10 桌面运行时。
+> 便携版不含自带运行时，需本机已安装 .NET 10 桌面运行时。
 > 未安装时会提示“缺少 .NET 运行时”，前往微软官网下载 `.NET Desktop Runtime 10.0` 即可。
 
 ### 二、Python 端（必须自行安装）
@@ -51,7 +51,7 @@ python -m pip install -r requirements.txt
 
 > jmcomic 自身还会带出 `commonx`、`curl-cffi`（网络传输）、`pycryptodome`（图片解密）等依赖，pip 会自动安装。
 >
-> 若 Python 装在非标准位置，可设置环境变量 `JML\\\\\\\\\\\\\\\_PYTHON\\\\\\\\\\\\\\\_HOME` 指向 Python 安装目录。
+> 若 Python 装在非标准位置，可设置环境变量 `JML\_PYTHON\_HOME` 指向 Python 安装目录。
 
 \---
 
@@ -69,7 +69,7 @@ python -m pip install -r requirements.txt
 JML.exe --selfcheck
 ```
 
-不启动界面，只输出环境诊断结果（Python、依赖、插件加载情况），用于排查环境问题。
+不启动界面，只输出环境诊断结果（Python、依赖、插件加载情况），用于排查环境问题。(为什么我不打包成傻子包呢?首先排除我懒)
 
 \---
 
@@ -84,7 +84,7 @@ JML.exe --selfcheck
 |zip\_browser|ZIP 浏览|浏览文件夹内打包为 zip 的本子（已废弃，作为前置存在）|
 |zip\_web|ZIP 网页浏览|唤起本地浏览器流畅浏览（依赖 zip\_browser）|
 
-> zip\\\\\\\\\\\\\\\_web 依赖 zip\\\\\\\\\\\\\\\_browser 提供的服务；若停用 zip\\\\\\\\\\\\\\\_browser，zip\\\\\\\\\\\\\\\_web 会明确报错而非崩溃。
+> zip_web 依赖 zip_browser 提供的服务；若停用 zip_browser，zip_web 会明确报错而非崩溃。
 
 \---
 
@@ -92,14 +92,14 @@ JML.exe --selfcheck
 
 |项|位置|
 |-|-|
-|配置 / 状态|`%APPDATA%\\\\\\\\\\\\\\\\JML`|
-|数据 / 日志 / 缓存|`%LOCALAPPDATA%\\\\\\\\\\\\\\\\JML`|
-|账号凭据|**Windows 凭据管理器**（首选）；不可用时回退 `%APPDATA%\\\\\\\\\\\\\\\\JML\\\\\\\\\\\\\\\\account.dat`（DPAPI 加密）|
+|配置 / 状态|`%APPDATA%\JML`|
+|数据 / 日志 / 缓存|`%LOCALAPPDATA%\JML`|
+|账号凭据|**Windows 凭据管理器**（首选）；不可用时回退 `%APPDATA%\JML\account.dat`（DPAPI 加密）|
 
 * 账号凭据**不写入程序目录**，便携版拷贝到其他电脑不会带走账号
 * 凭据**绝不明文存储**；两者均不可用时不保存账号，仅给出提示
 
-> 极端情况：当 `%APPDATA%` 与系统临时目录都不可写时，数据会降级到程序目录下的 `runtime\\\\\\\\\\\\\\\_data`。
+> 极端情况：当 `%APPDATA%` 与系统临时目录都不可写时，数据会降级到程序目录下的 `runtime\_data`。
 > 此时拷贝程序目录会带走数据文件，请注意。
 
 \---
@@ -134,5 +134,5 @@ scripts/publish-portable.ps1
 * [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python) — 核心业务库 jmcomic
 * [PCL-Community/PCL-CE](https://github.com/PCL-Community/PCL-CE) 与 [Meloong-Git/PCL](https://github.com/Meloong-Git/PCL) — 界面控件与动画方案
 * [PlainToolkit.UI](https://github.com/PCL-Community) — PCL2 风格 WPF 控件库
-</tool\_calls:6124c78e>
+
 
