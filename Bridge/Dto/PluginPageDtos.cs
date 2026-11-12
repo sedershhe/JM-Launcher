@@ -284,6 +284,128 @@ public record PluginActionPageDto
     public string EmptyText { get; init; } = "";
 }
 
+/// <summary>search 模板的搜索框（协议 §6.9：<c>search_box</c>）。</summary>
+public record PluginSearchBoxDto
+{
+    [JsonPropertyName("label")]
+    public string Label { get; init; } = "";
+
+    /// <summary>输入框为空时显示的灰色提示文案。</summary>
+    [JsonPropertyName("placeholder")]
+    public string Placeholder { get; init; } = "";
+
+    /// <summary>当前关键词；点搜索 / 回车时 C# 以 <c>keyword</c> 键回传。</summary>
+    [JsonPropertyName("value")]
+    public string Value { get; init; } = "";
+
+    [JsonPropertyName("submit_text")]
+    public string SubmitText { get; init; } = "";
+}
+
+/// <summary>search 模板的筛选下拉（协议 §6.9：<c>filters[]</c>）。</summary>
+public record PluginSearchFilterDto
+{
+    [JsonPropertyName("key")]
+    public string Key { get; init; } = "";
+
+    [JsonPropertyName("label")]
+    public string Label { get; init; } = "";
+
+    [JsonPropertyName("options")]
+    public List<PluginPageFilterOptionDto> Options { get; init; } = [];
+
+    [JsonPropertyName("value")]
+    public string Value { get; init; } = "";
+
+    /// <summary>该通道是否支持此筛选；<c>false</c> 时下拉禁用并提示 <see cref="Hint"/>。</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>筛选不可用时的说明（可选）。</summary>
+    [JsonPropertyName("hint")]
+    public string Hint { get; init; } = "";
+}
+
+/// <summary>search 模板的能力位（协议 §6.9：<c>capabilities</c>，缺省全 true）。</summary>
+public record PluginSearchCapabilitiesDto
+{
+    [JsonPropertyName("time")]
+    public bool Time { get; init; } = true;
+
+    [JsonPropertyName("category")]
+    public bool Category { get; init; } = true;
+
+    [JsonPropertyName("sub_category")]
+    public bool SubCategory { get; init; } = true;
+}
+
+/// <summary>search 模板的高级筛选折叠区元数据（协议 §6.9：<c>advanced</c>）。</summary>
+public record PluginSearchAdvancedDto
+{
+    [JsonPropertyName("label")]
+    public string Label { get; init; } = "";
+
+    [JsonPropertyName("default_expanded")]
+    public bool DefaultExpanded { get; init; }
+
+    /// <summary>折叠头右侧的摘要文案。</summary>
+    [JsonPropertyName("summary")]
+    public string Summary { get; init; } = "";
+}
+
+/// <summary>
+/// search 模板 payload（协议 §6.9）。行结构与 list 相同，额外支持 <c>tags</c>；
+/// 封面尺寸固定 80×110，由页面内的搜索结果行模板负责展示。
+/// </summary>
+public record PluginSearchPageDto
+{
+    [JsonPropertyName("search_box")]
+    public PluginSearchBoxDto SearchBox { get; init; } = new();
+
+    [JsonPropertyName("filters")]
+    public List<PluginSearchFilterDto> Filters { get; init; } = [];
+
+    [JsonPropertyName("advanced")]
+    public PluginSearchAdvancedDto Advanced { get; init; } = new();
+
+    /// <summary>行数据：每行是 key → 任意 JSON 值（原样回传给动作）。</summary>
+    [JsonPropertyName("rows")]
+    public List<Dictionary<string, JsonElement>> Rows { get; init; } = [];
+
+    [JsonPropertyName("page")]
+    public int Page { get; init; } = 1;
+
+    [JsonPropertyName("page_size")]
+    public int PageSize { get; init; } = 50;
+
+    [JsonPropertyName("total")]
+    public int Total { get; init; }
+
+    /// <summary>总页数（可选；缺省 0 表示由 page/page_size 推算）。</summary>
+    [JsonPropertyName("total_pages")]
+    public int TotalPages { get; init; }
+
+    /// <summary>取词通道：<c>html</c> / <c>api</c>（只做展示，C# 不解释）。</summary>
+    [JsonPropertyName("channel")]
+    public string Channel { get; init; } = "";
+
+    [JsonPropertyName("capabilities")]
+    public PluginSearchCapabilitiesDto Capabilities { get; init; } = new();
+
+    /// <summary>降级提示 / 通道说明（空串 = 不显示）。</summary>
+    [JsonPropertyName("hint")]
+    public string Hint { get; init; } = "";
+
+    [JsonPropertyName("row_actions")]
+    public List<PluginPageRowActionDto> RowActions { get; init; } = [];
+
+    [JsonPropertyName("row_double_click_action")]
+    public string RowDoubleClickAction { get; init; } = "";
+
+    [JsonPropertyName("empty_text")]
+    public string EmptyText { get; init; } = "";
+}
+
 /// <summary>
 /// 模板 payload 的强类型转换：只做 JSON → DTO 的形状转换，
 /// 不含任何业务判断（是否空、怎么排序、成功失败全在 Python）。
@@ -311,5 +433,10 @@ public static class PluginPageData
     public static PluginActionPageDto? ToAction(JsonElement data) =>
         IsObject(data)
             ? JsonSerializer.Deserialize<PluginActionPageDto>(data.GetRawText(), Options)
+            : null;
+
+    public static PluginSearchPageDto? ToSearch(JsonElement data) =>
+        IsObject(data)
+            ? JsonSerializer.Deserialize<PluginSearchPageDto>(data.GetRawText(), Options)
             : null;
 }

@@ -9,8 +9,8 @@
 - 所有注册都在 :class:`PageRegistry` 的显式 RLock 内完成（旧缺陷 #10：
   不依赖 GIL 侥幸），读写路径都加锁；
 - 页面数据一律是纯 JSON 可序列化 dict；插件**不得**返回任意界面描述
-  （XAML 等），模板只能是 ``list`` / ``browser`` / ``action`` / ``form``，
-  由 manifest 决定（本模块从 manifest 取，不读插件返回值）；
+  （XAML 等），模板只能是 ``list`` / ``search`` / ``browser`` / ``action`` /
+  ``form``，由 manifest 决定（本模块从 manifest 取，不读插件返回值）；
 - 图片走独立入口 :func:`fetch_page_image` 返回原始 bytes，**不** base64
   塞进 JSON。
 
@@ -194,7 +194,7 @@ def load_page(plugin_id: str, page_id: str, params: dict) -> dict:
 
     返回::
 
-        {"ok": true, "template": "list|browser|action|form",
+        {"ok": true, "template": "list|search|browser|action|form",
          "title": "<manifest 声明标题>", "data": {<插件返回的模板 payload>}}
 
     异常:

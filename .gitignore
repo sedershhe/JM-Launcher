@@ -46,3 +46,9 @@ pytest-cache-files-*/
 test_config_probe.py
 # 发布产物（可重建，不入库）
 dist/
+
+# 本机 DSH 会话配置（工具范围，不入库）
+.dsh-scope.json
+
+# pytest 缓存
+.pytest_cache/

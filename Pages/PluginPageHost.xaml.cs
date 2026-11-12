@@ -55,6 +55,25 @@ public partial class PluginPageHost : UserControl
     // list 模板行双击动作（阶段 4-4 协议扩展：data.row_double_click_action）
     private string _rowDoubleClickAction = string.Empty;
 
+    // search 模板分页与筛选暂存（强化搜索插件阶段 3）
+    private int _searchPage = 1;
+    private int _searchTotalPages = 1;
+    private readonly Dictionary<string, string> _searchFilterValues = [];
+    private readonly Dictionary<string, List<PluginPageFilterOptionDto>> _searchFilterOptions = [];
+    private bool _rebuildingSearchFilters;
+
+    // 高级筛选折叠区是否已按 Python 的 default_expanded 初始化过：只初始化一次，
+    // 之后翻页 / 重新搜索都保留用户当前的展开状态（避免每次加载又折回去）。
+    private bool _searchAdvancedInitialised;
+
+    // search 模板最近一次提交的完整加载参数（翻页复用它，不用输入框/下拉里
+    // 尚未提交的新值；重置时只保留 page）。
+    private Dictionary<string, object?> _searchCommitted = [];
+
+    // search 模板行双击动作。与 list 的 _rowDoubleClickAction 分开保存：
+    // 两个模板的 data.row_double_click_action 互不覆盖，双击处理器各读各的。
+    private string _searchRowDoubleClickAction = string.Empty;
+
     // list 模板封面列（阶段 4-4 协议扩展：行内 thumb_book_id）
     // 只在行容器被虚拟化创建（= 当前可见/已加载）时取图；同一 book_id 全局去重缓存。
     private DataGridTemplateColumn? _coverColumn;
@@ -160,6 +179,19 @@ public partial class PluginPageHost : UserControl
     internal IReadOnlyList<ComboBox> ListFilterCombos =>
         PanelListFilters.Children.OfType<ComboBox>().ToList();
 
+    /// <summary>当前 search 模板渲染出的筛选下拉（测试用；顺序与 Python 一致）。</summary>
+    internal IReadOnlyList<ComboBox> SearchFilterCombos =>
+        PanelSearchAdvanced.Children
+            .OfType<StackPanel>()
+            .SelectMany(panel => panel.Children.OfType<ComboBox>())
+            .ToList();
+
+    /// <summary>当前 search 模板页码（测试用）。</summary>
+    internal int SearchPage => _searchPage;
+
+    /// <summary>当前 search 模板的双击动作 id（空串 = 不响应）。</summary>
+    internal string SearchRowDoubleClickAction => _searchRowDoubleClickAction;
+
     /// <summary>当前已选文件夹（Python 的 <c>data.folder</c>，回传时带上）。</summary>
     internal string CurrentFolder => _folder;
 
@@ -240,41 +272,55 @@ public partial class PluginPageHost : UserControl
     /// <summary>载入指定列表页（list/browser 共用 page 参数；action 忽略页码）。</summary>
     public async Task LoadAsync(int page)
     {
-        if (string.IsNullOrWhiteSpace(PluginId) || string.IsNullOrWhiteSpace(PageId))
-        {
-            TextError.Text = "插件页面缺少 plugin_id / page_id，无法载入。";
-            TextError.Visibility = Visibility.Visible;
-            return;
-        }
+        // 每次载入（含翻页 / 刷新）都显示挥镐动画，结束（成功、失败或异常）统一收回。
+        LoadingPickaxe.Visibility = Visibility.Visible;
+        LoadingPickaxe.IsRunning = true;
 
         try
         {
-            int requested = page < 1 ? 1 : page;
-            var parameters = new Dictionary<string, object?>
+            if (string.IsNullOrWhiteSpace(PluginId) || string.IsNullOrWhiteSpace(PageId))
             {
-                ["page"] = requested,
-            };
-            AddFolderParameter(parameters);
-            AddListFilterParameters(parameters);
-            ShowStatus("正在加载页面…");
-            PluginPageLoadResultDto result =
-                await _gateway.LoadAsync(PluginId, PageId, parameters);
-            ApplyLoad(result);
-            if (result.Ok)
-            {
-                ClearStatus();
+                TextError.Text = "插件页面缺少 plugin_id / page_id，无法载入。";
+                TextError.Visibility = Visibility.Visible;
+                return;
             }
 
-            if (result.Ok && string.Equals(result.Template, "browser", StringComparison.Ordinal)
-                && _viewingImage)
+            try
             {
-                await LoadImageAsync();
+                int requested = page < 1 ? 1 : page;
+                var parameters = new Dictionary<string, object?>
+                {
+                    ["page"] = requested,
+                };
+                AddFolderParameter(parameters);
+                AddListFilterParameters(parameters);
+                AddSearchParameters(parameters);
+                ShowStatus("正在加载页面…");
+                PluginPageLoadResultDto result =
+                    await _gateway.LoadAsync(PluginId, PageId, parameters);
+                ApplyLoad(result);
+                if (result.Ok)
+                {
+                    ClearStatus();
+                }
+
+                if (result.Ok && string.Equals(result.Template, "browser", StringComparison.Ordinal)
+                    && _viewingImage)
+                {
+                    await LoadImageAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                // 网关已收口；这里兜底，保证页面不因宿主异常崩掉。
+                ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
             }
         }
-        catch (Exception ex)
+        finally
         {
-            // 网关已收口；这里兜底，保证页面不因宿主异常崩掉。
-            ShowError("UNKNOWN_ERROR", LogSanitizer.Sanitize(ex.Message));
+            // 失败路径也必须停止动画，避免挥镐一直盖在内容上。
+            LoadingPickaxe.IsRunning = false;
+            LoadingPickaxe.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -307,6 +353,9 @@ public partial class PluginPageHost : UserControl
         {
             case "list":
                 RenderList(result.Data);
+                break;
+            case "search":
+                RenderSearch(result.Data);
                 break;
             case "browser":
                 RenderBrowser(result.Data);
@@ -517,6 +566,368 @@ public partial class PluginPageHost : UserControl
     }
 
     // ------------------------------------------------------------------
+    // search 模板（强化搜索插件阶段 3）
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// 渲染 search 模板：搜索框回填、筛选下拉重建、高级折叠、80×110 结果行、
+    /// 分页与降级提示。所有内容来自 Python（协议 §6.9），C# 不做业务判断。
+    /// </summary>
+    private void RenderSearch(JsonElement data)
+    {
+        PluginSearchPageDto? page = PluginPageData.ToSearch(data);
+        if (page is null)
+        {
+            ShowError("INVALID_DATA", "search 模板数据不是 JSON 对象");
+            return;
+        }
+
+        ShowOnly(PanelSearch);
+
+        PluginSearchBoxDto searchBox = page.SearchBox ?? new PluginSearchBoxDto();
+        SearchBox.Text = searchBox.Value ?? string.Empty;
+        TextSearchPlaceholder.Text = searchBox.Placeholder ?? string.Empty;
+        BtnSearch.Content = string.IsNullOrWhiteSpace(searchBox.SubmitText)
+            ? "搜索"
+            : searchBox.SubmitText;
+        UpdateSearchPlaceholder();
+
+        BuildSearchFilters(page);
+        RenderSearchAdvanced(page.Advanced ?? new PluginSearchAdvancedDto());
+
+        _searchPage = page.Page > 0 ? page.Page : 1;
+        List<Dictionary<string, JsonElement>> rows = page.Rows ?? [];
+        _searchTotalPages = ResolveTotalPages(
+            page.TotalPages, page.Total, page.PageSize, rows.Count);
+        TextSearchPage.Text = $"第 {_searchPage} 页 / 共 {_searchTotalPages} 页";
+        BtnSearchPrev.IsEnabled = _searchPage > 1;
+        BtnSearchNext.IsEnabled = _searchPage < _searchTotalPages;
+
+        // 协议允许省略分页字段：total_pages / total 都为 0 且没有行时整块隐藏。
+        bool noPager = page.TotalPages == 0 && page.Total == 0 && rows.Count == 0;
+        CardSearchPager.Visibility = noPager ? Visibility.Collapsed : Visibility.Visible;
+
+        // 双击动作与 list 分开保存；空串 = 本页双击不响应。
+        _searchRowDoubleClickAction = (page.RowDoubleClickAction ?? string.Empty).Trim();
+        BuildSearchColumn();
+
+        bool empty = rows.Count == 0;
+        GridSearchRows.ItemsSource = rows
+            .Select((row, index) => new PluginRowView(
+                row,
+                index,
+                Array.Empty<PluginPageColumnDto>(),
+                page.RowActions ?? [],
+                _title,
+                (actionId, view) => _ = RunActionAsync(
+                    actionId, BuildRowPayload(view, _searchPage)),
+                ReadExplicitTags(row)))
+            .ToList();
+
+        TextSearchEmpty.Text = string.IsNullOrWhiteSpace(page.EmptyText)
+            ? "未找到相关结果"
+            : page.EmptyText;
+        TextSearchEmpty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+        GridSearchRows.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+
+        string hint = (page.Hint ?? string.Empty).Trim();
+        TextSearchHint.Text = hint;
+        TextSearchHint.Visibility = hint.Length > 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    /// <summary>读取 search 行可选的 tags 字段（协议为字符串，也兼容字符串数组）。</summary>
+    private static string ReadExplicitTags(Dictionary<string, JsonElement> row)
+    {
+        if (!row.TryGetValue("tags", out JsonElement value))
+        {
+            return string.Empty;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? string.Empty,
+            JsonValueKind.Array => string.Join(
+                " ",
+                value.EnumerateArray()
+                    .Where(item => item.ValueKind == JsonValueKind.String)
+                    .Select(item => item.GetString())),
+            _ => string.Empty,
+        };
+    }
+
+    /// <summary>search 结果行：单列模板（80×110 行，定义在本页资源里）。</summary>
+    private void BuildSearchColumn()
+    {
+        GridSearchRows.Columns.Clear();
+        GridSearchRows.Columns.Add(new DataGridTemplateColumn
+        {
+            Header = string.Empty,
+            CellTemplate = (DataTemplate)FindResource("JmlSearchRowTemplate"),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+            CanUserResize = false,
+            IsReadOnly = true,
+        });
+    }
+
+    /// <summary>
+    /// 重建 search 筛选下拉：每个筛选是一组「标签 + 下拉」，放进高级筛选折叠区，
+    /// WrapPanel 自动换行（窄窗口不横向溢出）。选项、标签、当前值、是否可用
+    /// 全部来自 Python；下拉变更只暂存（<see cref="OnSearchFilterChanged"/>）。
+    /// </summary>
+    private void BuildSearchFilters(PluginSearchPageDto page)
+    {
+        _rebuildingSearchFilters = true;
+        try
+        {
+            PanelSearchAdvanced.Children.Clear();
+            _searchFilterValues.Clear();
+            _searchFilterOptions.Clear();
+
+            foreach (PluginSearchFilterDto filter in page.Filters ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(filter.Key)
+                    || filter.Options is null
+                    || filter.Options.Count == 0)
+                {
+                    continue;
+                }
+
+                var combo = new ComboBox
+                {
+                    Width = 150,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Tag = filter.Key,
+                    IsEnabled = filter.Enabled,
+                };
+
+                int selected = 0;
+                for (int index = 0; index < filter.Options.Count; index++)
+                {
+                    PluginPageFilterOptionDto option = filter.Options[index];
+                    combo.Items.Add(option.Label);
+                    if (string.Equals(option.Value, filter.Value, StringComparison.Ordinal))
+                    {
+                        selected = index;
+                    }
+                }
+
+                combo.SelectedIndex = selected;
+                combo.SelectionChanged += OnSearchFilterChanged;
+
+                if (!filter.Enabled)
+                {
+                    // 禁用控件默认不显示 ToolTip，必须显式打开 ShowOnDisabled。
+                    combo.ToolTip = string.IsNullOrWhiteSpace(filter.Hint)
+                        ? "该通道不支持此筛选"
+                        : filter.Hint;
+                    ToolTipService.SetShowOnDisabled(combo, true);
+                }
+
+                _searchFilterOptions[filter.Key] = filter.Options;
+                _searchFilterValues[filter.Key] = filter.Options[selected].Value;
+
+                var group = new StackPanel
+                {
+                    Width = 150,
+                    Margin = new Thickness(0, 0, 14, 12),
+                };
+                group.Children.Add(new TextBlock
+                {
+                    Text = string.IsNullOrWhiteSpace(filter.Label) ? filter.Key : filter.Label,
+                    Margin = new Thickness(0, 0, 0, 4),
+                    FontSize = 12,
+                    Foreground = TryFindResource("ColorBrushGray3") as Brush,
+                });
+                group.Children.Add(combo);
+                PanelSearchAdvanced.Children.Add(group);
+            }
+        }
+        finally
+        {
+            _rebuildingSearchFilters = false;
+        }
+    }
+
+    /// <summary>
+    /// search 筛选变更：只更新暂存值，不重新加载。用户点「搜索」/ 回车时
+    /// 才把全部筛选 key 与 keyword 一起提交（协议 §6.9）。
+    /// </summary>
+    private void OnSearchFilterChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_rebuildingSearchFilters
+            || sender is not ComboBox combo
+            || combo.Tag is not string key
+            || combo.SelectedIndex < 0
+            || !_searchFilterOptions.TryGetValue(
+                key, out List<PluginPageFilterOptionDto>? options)
+            || combo.SelectedIndex >= options.Count)
+        {
+            return;
+        }
+
+        _searchFilterValues[key] = options[combo.SelectedIndex].Value;
+    }
+
+    /// <summary>
+    /// 应用高级筛选折叠区的标题 / 默认展开 / 摘要。内容（筛选下拉）由
+    /// <see cref="BuildSearchFilters"/> 先填好，这里不能再清空容器。
+    /// </summary>
+    private void RenderSearchAdvanced(PluginSearchAdvancedDto advanced)
+    {
+        SearchAdvanced.Header = string.IsNullOrWhiteSpace(advanced.Label)
+            ? "高级筛选"
+            : advanced.Label;
+        SearchAdvanced.Summary = advanced.Summary ?? string.Empty;
+        if (!_searchAdvancedInitialised)
+        {
+            SearchAdvanced.IsExpanded = advanced.DefaultExpanded;
+            _searchAdvancedInitialised = true;
+        }
+    }
+
+    private void UpdateSearchPlaceholder()
+    {
+        // 聚焦时隐藏水印：覆盖层压在 TextBox 上，和输入光标同位置会糊成一团。
+        TextSearchPlaceholder.Visibility =
+            string.IsNullOrEmpty(SearchBox.Text)
+            && !SearchBox.IsKeyboardFocusWithin
+            && !string.IsNullOrEmpty(TextSearchPlaceholder.Text)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+    }
+
+    private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) =>
+        UpdateSearchPlaceholder();
+
+    private void SearchBox_FocusChanged(object sender, KeyboardFocusChangedEventArgs e) =>
+        UpdateSearchPlaceholder();
+
+    private void SearchBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        SubmitSearch(1);
+        e.Handled = true;
+    }
+
+    private void BtnSearch_Click(object sender, RoutedEventArgs e) => SubmitSearch(1);
+
+    private void BtnSearchPrev_Click(object sender, RoutedEventArgs e) =>
+        LoadSearchPage(_searchPage - 1);
+
+    private void BtnSearchNext_Click(object sender, RoutedEventArgs e) =>
+        LoadSearchPage(_searchPage + 1);
+
+    /// <summary>
+    /// 用户主动提交：读取当前输入框与下拉暂存值，组成
+    /// <c>{page, keyword, &lt;filter key&gt;: &lt;value&gt;...}</c> 后加载并记住整套参数。
+    /// </summary>
+    private void SubmitSearch(int page)
+    {
+        int target = page < 1 ? 1 : page;
+        var parameters = new Dictionary<string, object?>
+        {
+            ["page"] = target,
+            ["keyword"] = (SearchBox.Text ?? string.Empty).Trim(),
+        };
+        foreach (KeyValuePair<string, string> pair in _searchFilterValues)
+        {
+            parameters[pair.Key] = pair.Value;
+        }
+
+        _searchCommitted = parameters;
+        _ = LoadAsync(target);
+    }
+
+    /// <summary>
+    /// 翻页：复制最近一次提交的整套参数（keyword / 筛选值），只改 page。
+    /// 用户改了输入框或下拉但没点搜索时，翻页仍使用上次提交的值。
+    /// </summary>
+    private void LoadSearchPage(int page)
+    {
+        int target = page < 1 ? 1 : page;
+        if (_searchCommitted.Count == 0)
+        {
+            SubmitSearch(target);
+            return;
+        }
+
+        var parameters = new Dictionary<string, object?>(_searchCommitted)
+        {
+            ["page"] = target,
+        };
+        _searchCommitted = parameters;
+        _ = LoadAsync(target);
+    }
+
+    /// <summary>重置：清空关键词与筛选暂存，只提交 <c>{page:1}</c>。</summary>
+    private void BtnSearchReset_Click(object sender, RoutedEventArgs e)
+    {
+        SearchBox.Text = string.Empty;
+
+        // 下拉回到第一项仅作视觉复位；重建标志避免 SelectionChanged 写回暂存值。
+        _rebuildingSearchFilters = true;
+        try
+        {
+            foreach (ComboBox combo in SearchFilterCombos)
+            {
+                combo.SelectedIndex = 0;
+            }
+        }
+        finally
+        {
+            _rebuildingSearchFilters = false;
+        }
+
+        _searchFilterValues.Clear();
+        _searchCommitted = new Dictionary<string, object?> { ["page"] = 1 };
+        UpdateSearchPlaceholder();
+        _ = LoadAsync(1);
+    }
+
+    /// <summary>把最近一次提交的整套参数透传给 Python（只对 search 模板生效）。</summary>
+    private void AddSearchParameters(Dictionary<string, object?> parameters)
+    {
+        if (!string.Equals(_template, "search", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        foreach (KeyValuePair<string, object?> pair in _searchCommitted)
+        {
+            parameters[pair.Key] = pair.Value;
+        }
+    }
+
+    /// <summary>search 结果行双击：动作 id 来自 data.row_double_click_action。</summary>
+    private async void GridSearchRows_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (string.IsNullOrEmpty(_searchRowDoubleClickAction))
+        {
+            return;
+        }
+
+        if (HasAncestor<Button>(e.OriginalSource as DependencyObject)
+            || HasAncestor<DataGridColumnHeader>(e.OriginalSource as DependencyObject))
+        {
+            return;
+        }
+
+        if (GridSearchRows.SelectedItem is not PluginRowView row)
+        {
+            return;
+        }
+
+        await RunActionAsync(
+            _searchRowDoubleClickAction, BuildRowPayload(row, _searchPage));
+    }
+
+    // ------------------------------------------------------------------
     // list 模板：封面（阶段 4-4 协议扩展：行内 thumb_book_id）
     // ------------------------------------------------------------------
 
@@ -687,11 +1098,18 @@ public partial class PluginPageHost : UserControl
     }
 
     /// <summary>行动作 / 双击共用的参数：整行原始 JSON + 行下标 + 当前页码。</summary>
-    private Dictionary<string, object?> BuildRowPayload(PluginRowView? row) => new()
+    private Dictionary<string, object?> BuildRowPayload(PluginRowView? row) =>
+        BuildRowPayload(row, _listPage);
+
+    /// <summary>
+    /// 指定页码的三键 payload（list 用 _listPage，search 用 _searchPage）；
+    /// 键名与协议一致，不随模板变化。
+    /// </summary>
+    private Dictionary<string, object?> BuildRowPayload(PluginRowView? row, int page) => new()
     {
         ["row"] = row?.Row,
         ["row_index"] = row?.Index ?? -1,
-        ["page"] = _listPage,
+        ["page"] = page,
     };
 
     /// <summary>沿视觉/逻辑父链找祖先（OriginalSource 可能是 TextBlock / Border 等）。</summary>
@@ -1545,7 +1963,15 @@ public partial class PluginPageHost : UserControl
 
         if (result.Refresh)
         {
-            await LoadAsync(_template == "browser" ? _filePage : _listPage);
+            // search 的页码在 _searchPage（list 是 _listPage，browser 是 _filePage）；
+            // 刷新后仍打开用户当前所在页，筛选参数由 AddSearchParameters 透传。
+            int reloadPage = _template switch
+            {
+                "browser" => _filePage,
+                "search" => _searchPage,
+                _ => _listPage,
+            };
+            await LoadAsync(reloadPage);
             // 重载会清掉临时错误，自动唤起放在重载之后，失败文案才不会被覆盖。
             TryAutoOpenRenderedUrl();
             return;
@@ -1665,6 +2091,9 @@ public partial class PluginPageHost : UserControl
         PanelAction.Visibility = ReferenceEquals(panel, PanelAction)
             ? Visibility.Visible
             : Visibility.Collapsed;
+        PanelSearch.Visibility = ReferenceEquals(panel, PanelSearch)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     internal void ShowError(string? errorCode, string? errorMessage)
@@ -1770,6 +2199,7 @@ internal sealed record BrowserOpenRecord(
 internal sealed class PluginRowView : INotifyPropertyChanged
 {
     private readonly IReadOnlyList<PluginPageColumnDto> _columns;
+    private readonly string? _explicitTags;
     private ImageSource? _cover;
     private bool _coverFailed;
 
@@ -1779,11 +2209,13 @@ internal sealed class PluginRowView : INotifyPropertyChanged
         IReadOnlyList<PluginPageColumnDto> columns,
         IReadOnlyList<PluginPageRowActionDto> actions,
         string sourceTitle,
-        Action<string, PluginRowView> actionInvoked)
+        Action<string, PluginRowView> actionInvoked,
+        string? explicitTags = null)
     {
         Row = row;
         Index = index;
         _columns = columns;
+        _explicitTags = explicitTags;
         ThumbBookId = PluginPageRowFields.GetThumbBookId(row);
 
         string bookId = ReadText("book_id");
@@ -1921,6 +2353,22 @@ internal sealed class PluginRowView : INotifyPropertyChanged
     {
         var tags = new List<string>();
 
+        // search 模板的 rows 额外支持 tags（字符串，空格 / 逗号分隔，协议 §6.9）。
+        // list 不传 explicitTags，因此这里不会改变原有列表的标签行为。
+        if (!string.IsNullOrWhiteSpace(_explicitTags))
+        {
+            foreach (string tag in _explicitTags.Split(
+                         [' ', ',', '，'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (tags.Count >= 3)
+                {
+                    break;
+                }
+
+                tags.Add(tag);
+            }
+        }
+
         string result = ReadText("result");
         if (result.Length > 0)
         {
@@ -1961,6 +2409,11 @@ internal sealed class PluginRowView : INotifyPropertyChanged
 
     private void AddCountTag(List<string> tags, string key, string fallbackLabel)
     {
+        if (tags.Count >= 3)
+        {
+            return;
+        }
+
         string value = ReadText(key);
         if (value.Length == 0 || value == "0")
         {

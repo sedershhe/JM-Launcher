@@ -19,6 +19,141 @@
              xmlns:ctl="clr-namespace:JML.Controls"
              Focusable="True"
              KeyDown="Host_KeyDown">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- JmlCollapse 只在本页使用：样式字典在这里合并，避免改动全局
+                     Controls/JmlControls.xaml；STA 测试同样经本页构造控件，
+                     因此能加载到隐式样式。 -->
+                <ResourceDictionary Source="pack://application:,,,/JML;component/Controls/JmlCollapse.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- search 行内操作：PCL2 风格的轻量文字按钮（无边框、无底色，悬停变主题蓝）。
+                 不复用 SecondaryButton：那套 1px 深色边框在窄行里看着像两根莫名其妙的线。 -->
+            <Style x:Key="JmlSearchRowActionButton" TargetType="Button">
+                <Setter Property="Height" Value="24" />
+                <Setter Property="Padding" Value="8,0" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Foreground" Value="{DynamicResource ColorBrushGray3}" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="Transparent"
+                                    Padding="{TemplateBinding Padding}">
+                                <TextBlock Text="{TemplateBinding Content}"
+                                           FontSize="{TemplateBinding FontSize}"
+                                           Foreground="{TemplateBinding Foreground}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Foreground" Value="{DynamicResource ColorBrush2}" />
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter Property="Opacity" Value="0.5" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- search 模板结果行：照抄 Pages/SearchPage.xaml 的 80×110 结果行，
+                 数据绑定换成 PluginRowView 的字段；不抽公共资源、不改 SearchPage.xaml。
+                 行高由 DataGrid 的 RowHeight=126 固定，模板 MinHeight 与之对齐：
+                 JmlDataGrid 样式的 RowHeight=36 会压扁行，行模板里的 MinHeight
+                 赢不过样式设的行高，所以这里必须在 GridSearchRows 上显式覆盖。 -->
+            <DataTemplate x:Key="JmlSearchRowTemplate">
+                <Border x:Name="RowBack"
+                        Background="Transparent"
+                        CornerRadius="3"
+                        Padding="0,8"
+                        MinHeight="126">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 封面：占位 → 图片；失败显示暗红底 X（80×110） -->
+                        <Grid Grid.Column="0" Width="80" Height="110" VerticalAlignment="Center">
+                            <Border Background="{DynamicResource ColorBrushGray7}"
+                                    CornerRadius="3"
+                                    Visibility="{Binding PlaceholderVisibility}">
+                                <TextBlock Text="加载中…"
+                                           FontSize="11"
+                                           Foreground="{DynamicResource ColorBrushGray3}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <Border Background="{DynamicResource ColorBrushRedBack}"
+                                    CornerRadius="3"
+                                    Visibility="{Binding FailureVisibility}">
+                                <TextBlock Text="X"
+                                           FontSize="36"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource ColorBrushRedLight}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <Image Source="{Binding Cover}"
+                                   Stretch="UniformToFill"
+                                   Visibility="{Binding CoverVisibility}"
+                                   RenderOptions.BitmapScalingMode="HighQuality" />
+                        </Grid>
+
+                        <!-- 标题 14 加粗；副标题 12。标签挪到右列（PCL2 小字，右对齐）。 -->
+                        <StackPanel Grid.Column="1"
+                                    Margin="12,0,12,0"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="{Binding TitleText}"
+                                       FontWeight="Bold"
+                                       FontSize="14"
+                                       TextTrimming="CharacterEllipsis"
+                                       Foreground="{DynamicResource ColorBrush1}" />
+                            <TextBlock Text="{Binding SubtitleText}"
+                                       Margin="0,4,0,0"
+                                       FontSize="12"
+                                       TextTrimming="CharacterEllipsis"
+                                       Foreground="{DynamicResource ColorBrushGray3}" />
+                        </StackPanel>
+
+                        <!-- 右列：行内操作（详情 / 下载）。标签已按用户要求去掉。 -->
+                        <StackPanel Grid.Column="2"
+                                    VerticalAlignment="Center"
+                                    Margin="8,0,0,0">
+                            <ItemsControl ItemsSource="{Binding Actions}"
+                                          HorizontalAlignment="Right">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button Content="{Binding Title}"
+                                                Command="{Binding Command}"
+                                                Style="{StaticResource JmlSearchRowActionButton}"
+                                                Margin="4,0,0,0" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+                <DataTemplate.Triggers>
+                    <Trigger SourceName="RowBack" Property="IsMouseOver" Value="True">
+                        <Setter TargetName="RowBack" Property="Background"
+                                Value="{DynamicResource ColorBrush7}" />
+                    </Trigger>
+                </DataTemplate.Triggers>
+            </DataTemplate>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
     <Grid Margin="25,15,25,25">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -125,6 +260,154 @@
                                 Click="BtnListNext_Click" />
                     </StackPanel>
                 </ctl:JmlCard>
+            </Grid>
+
+            <!-- ================= search 模板 =================
+                 搜索框 + 筛选下拉 + 高级折叠 + 80×110 结果行 + 分页 + 降级提示。
+                 搜索框 / 筛选值 / 结果行 / 分页 / 提示全部来自 Python，C# 只负责
+                 暂存与按用户提交回传（keyword 固定键名，翻页复用最近一次提交）。 -->
+            <Grid x:Name="PanelSearch" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- 行 0：搜索框 + 搜索 / 重置（PCL2 圆角输入样式，回车提交） -->
+                <ctl:JmlCard Grid.Row="0" Padding="16,12" Margin="0,0,0,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <Grid Grid.Column="0" Height="34">
+                            <TextBox x:Name="SearchBox"
+                                     Style="{StaticResource JmlInputBox}"
+                                     BorderThickness="0"
+                                     Padding="10,0"
+                                     FontSize="13"
+                                     VerticalContentAlignment="Center"
+                                     TextChanged="SearchBox_TextChanged"
+                                     GotKeyboardFocus="SearchBox_FocusChanged"
+                                     LostKeyboardFocus="SearchBox_FocusChanged"
+                                     KeyDown="SearchBox_KeyDown" />
+                            <!-- 空值水印：TextBox 无原生 Placeholder，用覆盖层显示灰色提示；
+                                 不拦截鼠标；输入后由 TextChanged 隐藏，聚焦时也隐藏，
+                                 避免和输入光标叠在一起。 -->
+                            <TextBlock x:Name="TextSearchPlaceholder"
+                                       Margin="12,0,8,0"
+                                       VerticalAlignment="Center"
+                                       FontSize="13"
+                                       Foreground="{DynamicResource ColorBrushGray3}"
+                                       TextTrimming="CharacterEllipsis"
+                                       IsHitTestVisible="False" />
+                        </Grid>
+
+                        <Button x:Name="BtnSearch"
+                                Grid.Column="1"
+                                Content="搜索"
+                                Style="{StaticResource PrimaryButton}"
+                                MinWidth="84"
+                                Margin="8,0,0,0"
+                                Click="BtnSearch_Click" />
+                        <Button x:Name="BtnSearchReset"
+                                Grid.Column="2"
+                                Content="重置"
+                                Style="{StaticResource SecondaryButton}"
+                                MinWidth="76"
+                                Margin="8,0,0,0"
+                                Click="BtnSearchReset_Click" />
+                    </Grid>
+                </ctl:JmlCard>
+
+                <!-- 行 1：高级筛选折叠区（所有下拉都在展开区内，WrapPanel 自动换行，
+                     窄窗口也不会横向溢出；SelectionChanged 只暂存，点搜索才提交） -->
+                <ctl:JmlCollapse x:Name="SearchAdvanced"
+                                 Grid.Row="1"
+                                 Margin="0,0,0,8"
+                                 Header="高级筛选">
+                    <WrapPanel x:Name="PanelSearchAdvanced" Margin="0,4,0,0" />
+                </ctl:JmlCollapse>
+
+                <!-- 行 2：结果列表（单列 80×110 行模板） -->
+                <ctl:JmlCard Grid.Row="2" Padding="12" VerticalAlignment="Stretch">
+                    <Grid>
+                        <DataGrid x:Name="GridSearchRows"
+                                  Style="{StaticResource JmlDataGrid}"
+                                  AutoGenerateColumns="False"
+                                  RowHeight="126"
+                                  IsReadOnly="True"
+                                  CanUserAddRows="False"
+                                  CanUserDeleteRows="False"
+                                  CanUserSortColumns="False"
+                                  CanUserReorderColumns="False"
+                                  CanUserResizeColumns="False"
+                                  SelectionMode="Single"
+                                  HeadersVisibility="None"
+                                  GridLinesVisibility="None"
+                                  Background="Transparent"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                  LoadingRow="OnListRowLoading"
+                                  MouseDoubleClick="GridSearchRows_MouseDoubleClick">
+                            <DataGrid.CellStyle>
+                                <Style TargetType="DataGridCell"
+                                       BasedOn="{StaticResource PlainDataGridCell}">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="BorderThickness" Value="0" />
+                                    <Setter Property="Background" Value="Transparent" />
+                                </Style>
+                            </DataGrid.CellStyle>
+                        </DataGrid>
+
+                        <TextBlock x:Name="TextSearchEmpty"
+                                   Visibility="Collapsed"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource ColorBrushGray3}"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+                </ctl:JmlCard>
+
+                <!-- 行 3：分页（total_pages 为 0 且无数据时整块隐藏） -->
+                <ctl:JmlCard x:Name="CardSearchPager"
+                             Grid.Row="3"
+                             Margin="0,8,0,0"
+                             Padding="10,5"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center">
+                    <StackPanel x:Name="PanelSearchPager"
+                                Orientation="Horizontal">
+                        <Button x:Name="BtnSearchPrev"
+                                Content="上一页"
+                                Style="{StaticResource SecondaryButton}"
+                                MinWidth="76"
+                                Click="BtnSearchPrev_Click" />
+                        <TextBlock x:Name="TextSearchPage"
+                                   VerticalAlignment="Center"
+                                   Margin="12,0"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource ColorBrushGray3}" />
+                        <Button x:Name="BtnSearchNext"
+                                Content="下一页"
+                                Style="{StaticResource SecondaryButton}"
+                                MinWidth="76"
+                                Click="BtnSearchNext_Click" />
+                    </StackPanel>
+                </ctl:JmlCard>
+
+                <!-- 行 4：降级提示 / 取词通道说明（空串 = Collapsed） -->
+                <TextBlock x:Name="TextSearchHint"
+                           Grid.Row="4"
+                           Margin="4,6,0,0"
+                           FontSize="12"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ColorBrushGray3}"
+                           Visibility="Collapsed" />
             </Grid>
 
             <!-- ================= browser 模板 ================= -->
@@ -314,6 +597,17 @@
                     </Grid>
                 </DockPanel>
             </Grid>
+
+            <!-- 加载动画覆盖层：放在 Row=1 内容区所有 Panel 之后，
+                 居中浮在内容上方；IsHitTestVisible=False 避免挡住数据行与按钮。
+                 显隐与运行由 LoadAsync 控制，不参与布局（同一 Grid 内叠加）。 -->
+            <ctl:JmlLoadingPickaxe x:Name="LoadingPickaxe"
+                                   Width="60"
+                                   Height="47"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   IsHitTestVisible="False"
+                                   Visibility="Collapsed" />
         </Grid>
     </Grid>
 </UserControl>

@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using JML.Bridge;
 using JML.Bridge.Dto;
+using JML.Controls;
 using JML.Pages;
 using Xunit;
 
@@ -2228,6 +2229,12 @@ public class PluginPageTests
         /// </summary>
         public TaskCompletionSource? ActionGate { get; set; }
 
+        /// <summary>
+        /// 可选：载入返回前先等这个信号（验证“载入中显示挥镐动画、结束后收起”）。
+        /// 为 null 时立即返回 <see cref="PendingLoads"/> 里的结果。
+        /// </summary>
+        public TaskCompletionSource? LoadGate { get; set; }
+
         public List<string> ActionCalls { get; } = [];
 
         public Task<PluginPageLoadResultDto> LoadAsync(
@@ -2236,17 +2243,35 @@ public class PluginPageTests
             IReadOnlyDictionary<string, object?>? parameters)
         {
             LoadCalls.Add(PluginPageBridge.SerializeParameters(parameters));
-            if (PendingLoads.Count > 0)
+            if (LoadGate is { } gate)
             {
-                return Task.FromResult(PendingLoads.Dequeue());
+                // 先挂起，放行时才从 PendingLoads 取结果，模拟真实网络等待。
+                return CompleteAfterAsync(gate.Task, () => NextLoad(pluginId, pageId));
             }
 
-            return Task.FromResult(new PluginPageLoadResultDto
+            return Task.FromResult(NextLoad(pluginId, pageId));
+        }
+
+        /// <summary>按 <see cref="PendingLoads"/> 队列取下一个结果；空队列返回失败形态。</summary>
+        private PluginPageLoadResultDto NextLoad(string pluginId, string pageId)
+        {
+            if (PendingLoads.Count > 0)
+            {
+                return PendingLoads.Dequeue();
+            }
+
+            return new PluginPageLoadResultDto
             {
                 Ok = false,
                 ErrorCode = "NOT_FOUND",
                 ErrorMessage = $"假网关没有更多页面数据: {pluginId}/{pageId}",
-            });
+            };
+        }
+
+        private static async Task<T> CompleteAfterAsync<T>(Task gate, Func<T> valueFactory)
+        {
+            await gate;
+            return valueFactory();
         }
 
         public Task<PluginPageActionResultDto> ActionAsync(
@@ -2277,5 +2302,280 @@ public class PluginPageTests
             ImageCalls.Add(index);
             return Task.FromResult(ImageResult);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // search 模板（强化搜索插件阶段 3）
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// search payload：搜索框 + 两个筛选（time 可禁用）+ 高级折叠 + 80×110 行。
+    /// </summary>
+    private static PluginPageLoadResultDto SearchResult(
+        int page,
+        int totalPages,
+        int rows,
+        bool timeEnabled = true,
+        string keyword = "",
+        string hint = "",
+        string emptyText = "没有找到结果")
+    {
+        var rowList = Enumerable.Range(0, rows)
+            .Select(index =>
+                $"{{\"book_id\":\"{index + 100}\",\"title\":\"标题{index + 1}\","
+                + $"\"author\":\"作者{index + 1}\",\"page_count\":10,"
+                + "\"tags\":[\"标签A\",\"标签B\"]}")
+            .ToArray();
+        string hintJson = hint.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+        string json = $$"""
+        {
+          "ok": true,
+          "template": "search",
+          "title": "搜索",
+          "data": {
+            "search_box": {
+              "label": "关键词",
+              "placeholder": "输入关键词",
+              "value": "{{keyword}}",
+              "submit_text": "搜索"
+            },
+            "filters": [
+              {"key": "time", "label": "时间", "value": "all",
+               "enabled": {{(timeEnabled ? "true" : "false")}},
+               "hint": "当前通道不支持时间筛选",
+               "options": [
+                 {"value": "all", "label": "全部"},
+                 {"value": "week", "label": "本周"}
+               ]},
+              {"key": "category", "label": "分类", "value": "0",
+               "options": [
+                 {"value": "0", "label": "全部"},
+                 {"value": "1", "label": "单本"},
+                 {"value": "2", "label": "短篇"}
+               ]}
+            ],
+            "advanced": {
+              "label": "高级筛选",
+              "default_expanded": false,
+              "summary": "按标签 / 作者"
+            },
+            "rows": [{{string.Join(",", rowList)}}],
+            "page": {{page}},
+            "page_size": 20,
+            "total": {{rows * totalPages}},
+            "total_pages": {{totalPages}},
+            "channel": "html",
+            "capabilities": {
+              "time": {{(timeEnabled ? "true" : "false")}},
+              "category": true,
+              "sub_category": true
+            },
+            "row_actions": [
+              {"id": "detail", "title": "详情", "primary": true}
+            ],
+            "row_double_click_action": "detail",
+            "empty_text": "{{emptyText}}",
+            "hint": "{{hintJson}}"
+          }
+        }
+        """;
+
+        return Parse<PluginPageLoadResultDto>(json);
+    }
+
+    [Fact]
+    public void SearchTemplate_RendersPanelSearchAndFillsSearchBox()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+
+            host.ApplyLoad(SearchResult(
+                page: 2, totalPages: 5, rows: 3, keyword: "测试"));
+
+            Assert.Equal(Visibility.Visible, Find<Grid>(host, "PanelSearch").Visibility);
+            Assert.Equal(Visibility.Collapsed, Find<Grid>(host, "PanelList").Visibility);
+            Assert.Equal(Visibility.Collapsed, Find<Grid>(host, "PanelBrowser").Visibility);
+            Assert.Equal(Visibility.Collapsed, Find<Grid>(host, "PanelAction").Visibility);
+
+            Assert.Equal("测试", Find<TextBox>(host, "SearchBox").Text);
+            Assert.Equal(2, host.SearchFilterCombos.Count);
+            Assert.Equal("第 2 页 / 共 5 页", Find<TextBlock>(host, "TextSearchPage").Text);
+            Assert.True(Find<Button>(host, "BtnSearchPrev").IsEnabled);
+            Assert.True(Find<Button>(host, "BtnSearchNext").IsEnabled);
+            Assert.Equal(
+                Visibility.Collapsed, Find<TextBlock>(host, "TextSearchHint").Visibility);
+        });
+    }
+
+    [Fact]
+    public void SearchTemplate_FilterChangeOnlyStages_ThenSearchSubmitsAllKeys()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+            host.ApplyLoad(SearchResult(page: 1, totalPages: 2, rows: 2));
+
+            // 改下拉只暂存：不触发加载。
+            host.SearchFilterCombos[1].SelectedIndex = 2;
+            Assert.Empty(gateway.LoadCalls);
+
+            gateway.PendingLoads.Enqueue(
+                SearchResult(page: 1, totalPages: 2, rows: 2));
+            Find<Button>(host, "BtnSearch")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await WaitUntilAsync(() => gateway.LoadCalls.Count >= 1);
+
+            using JsonDocument document = JsonDocument.Parse(gateway.LoadCalls[0]);
+            JsonElement parameters = document.RootElement;
+            Assert.Equal(1, parameters.GetProperty("page").GetInt32());
+            Assert.Equal(string.Empty, parameters.GetProperty("keyword").GetString());
+            Assert.Equal("all", parameters.GetProperty("time").GetString());
+            Assert.Equal("2", parameters.GetProperty("category").GetString());
+        });
+    }
+
+    [Fact]
+    public void SearchTemplate_PagingReusesCommittedKeywordAndFilters()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+            host.ApplyLoad(SearchResult(
+                page: 1, totalPages: 3, rows: 2, keyword: "旧词"));
+
+            gateway.PendingLoads.Enqueue(
+                SearchResult(page: 1, totalPages: 3, rows: 2, keyword: "旧词"));
+            Find<Button>(host, "BtnSearch")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await WaitUntilAsync(() => gateway.LoadCalls.Count >= 1);
+
+            // 用户改了输入框与下拉但没点搜索：翻页仍应使用上次提交的值。
+            Find<TextBox>(host, "SearchBox").Text = "新词";
+            host.SearchFilterCombos[1].SelectedIndex = 2;
+
+            gateway.PendingLoads.Enqueue(
+                SearchResult(page: 2, totalPages: 3, rows: 2, keyword: "旧词"));
+            Find<Button>(host, "BtnSearchNext")
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await WaitUntilAsync(() => gateway.LoadCalls.Count >= 2);
+
+            using JsonDocument document = JsonDocument.Parse(gateway.LoadCalls[1]);
+            JsonElement parameters = document.RootElement;
+            Assert.Equal(2, parameters.GetProperty("page").GetInt32());
+            Assert.Equal("旧词", parameters.GetProperty("keyword").GetString());
+            Assert.Equal("all", parameters.GetProperty("time").GetString());
+            Assert.Equal("0", parameters.GetProperty("category").GetString());
+        });
+    }
+
+    [Fact]
+    public void SearchTemplate_DisabledCapability_DisablesComboWithTooltip()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+
+            host.ApplyLoad(SearchResult(
+                page: 1, totalPages: 1, rows: 1, timeEnabled: false));
+
+            ComboBox time = host.SearchFilterCombos[0];
+            Assert.False(time.IsEnabled);
+            Assert.NotNull(time.ToolTip);
+            Assert.Contains("不支持", time.ToolTip!.ToString()!);
+        });
+    }
+
+    [Fact]
+    public void SearchTemplate_RendersExplicitTagsAtMostThree()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var gateway = new FakePluginPageGateway();
+            var host = NewHost(gateway);
+
+            host.ApplyLoad(SearchResult(page: 1, totalPages: 1, rows: 1));
+
+            var view = Assert.IsType<PluginRowView>(
+                Find<DataGrid>(host, "GridSearchRows").Items[0]);
+            // 协议 §6.9：search 行额外支持 tags（字符串或字符串数组），最多显示 3 个。
+            Assert.Equal(new[] { "标签A", "标签B", "页数 10" }, view.Tags);
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // 加载动画（2026-11-08：PCL2 挥镐）
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void Host_LoadAsync_ShowsPickaxeWhileLoadPending()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway
+            {
+                LoadGate = new TaskCompletionSource(),
+            };
+            var host = NewHost(gateway);
+            var pickaxe = Find<JmlLoadingPickaxe>(host, "LoadingPickaxe");
+
+            Task loading = host.LoadAsync(1);
+
+            // 假网关被 LoadGate 卡住：LoadAsync 停在 await 上，动画应已显示并运行。
+            Assert.Equal(Visibility.Visible, pickaxe.Visibility);
+            Assert.True(pickaxe.IsRunning);
+            Assert.False(loading.IsCompleted);
+
+            // 放行并等结束，避免测试收尾时留下未完成任务。
+            gateway.LoadGate!.SetResult();
+            await loading;
+        });
+    }
+
+    [Fact]
+    public void Host_LoadAsync_HidesPickaxeAfterLoadCompletes()
+    {
+        UiSmokeTests.RunOnUiThreadAsync(async () =>
+        {
+            var gateway = new FakePluginPageGateway
+            {
+                LoadGate = new TaskCompletionSource(),
+            };
+            var host = NewHost(gateway);
+            var pickaxe = Find<JmlLoadingPickaxe>(host, "LoadingPickaxe");
+
+            Task loading = host.LoadAsync(1);
+            Assert.Equal(Visibility.Visible, pickaxe.Visibility);
+            Assert.True(pickaxe.IsRunning);
+
+            // 往 PendingLoads 补一个 list 结果并放行：载入结束后动画应收起并停止。
+            gateway.PendingLoads.Enqueue(ListResult(
+                page: 1, totalPages: 1, rows: 1, rowActions: 0, emptyText: ""));
+            gateway.LoadGate!.SetResult();
+            await loading;
+
+            Assert.Equal(Visibility.Collapsed, pickaxe.Visibility);
+            Assert.False(pickaxe.IsRunning);
+        });
+    }
+
+    [Fact]
+    public void SearchTemplate_RowHeightLeavesRoomForCover()
+    {
+        UiSmokeTests.RunOnUiThread(() =>
+        {
+            var host = NewHost(new FakePluginPageGateway());
+            host.ApplyLoad(SearchResult(page: 1, totalPages: 1, rows: 2));
+
+            var grid = Find<DataGrid>(host, "GridSearchRows");
+            // JmlDataGrid 默认行高 36 会裁掉 80×110 封面；search 模板必须显式撑到 ≥110。
+            Assert.True(grid.RowHeight >= 110,
+                $"search 行高应不小于封面高度 110，实际 {grid.RowHeight}");
+        });
     }
 }

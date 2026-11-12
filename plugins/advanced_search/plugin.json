@@ -1,0 +1,21 @@
+{
+  "id": "advanced_search",
+  "name": "强化搜索",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "按关键词、范围、排序、时间、分类与子分类组合搜索作品；结果可查看详情或下载。需要宿主 PAGE_TEMPLATES 含 search（宿主 ≥ 2026-11-08 版本）。",
+  "entry": "main.py",
+  "dependencies": {"plugins": []},
+  "services": {
+    "provides": [],
+    "requires": [{"name": "jm.search", "version": 1}]
+  },
+  "pages": [
+    {
+      "id": "advanced_search.main",
+      "title": "强化搜索",
+      "template": "search"
+    }
+  ],
+  "development_sample": false
+}

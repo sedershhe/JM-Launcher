@@ -44,9 +44,13 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import os
+import re
 import threading
+import time
+import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Iterator
 
@@ -225,6 +229,350 @@ def _install_log_capture() -> None:
 
 class _PrefetchStopped(Exception):
     """图片预取任务在生成器关闭后才启动：直接放弃，不再发起网络请求。"""
+
+
+# ---------------------------------------------------------------------------
+# 强化搜索：双通道（网页通道 + API 通道）
+# ---------------------------------------------------------------------------
+
+#: 网页通道单次请求超时（秒）。DNS / 超时 / 403 / SSL 任一发生即算该域失败。
+HTML_CHANNEL_TIMEOUT = 8.0
+
+#: 每次搜索的固定页大小。jmcomic 网页与 API 都是 80 条/页，且不受参数控制。
+SEARCH_PAGE_SIZE = 80
+
+#: 网页通道静态候选域名（P1 探针 2026-11-08 实测可用；动态列表不含 moco.work）。
+_HTML_DOMAIN_CANDIDATES = (
+    "comic18j-moco.work",
+    "comic18j-nico.site",
+    "comic18j-ada.work",
+)
+
+#: 域名池缓存与单个域失败冷却时间（秒）。
+_HTML_DOMAIN_TTL = 60.0
+
+#: 动态域名列表（发布页）最长等待时间：超时就用静态候选，保证 8 秒降级承诺。
+_HTML_DOMAIN_DISCOVERY_TIMEOUT = 3.0
+
+_HTML_DOMAIN_LOCK = threading.RLock()
+_HTML_DOMAIN_CACHE: dict = {"domains": [], "expires": 0.0}
+_HTML_DOMAIN_COOLDOWN: dict = {}
+
+#: 网页搜索页 total 节点（P1 结论：结果 >10000 时显示「共10000+部」，必须容忍 +）。
+_HTML_TOTAL_RE = re.compile(r'search-pagination-total">\s*共\s*(\d+)\s*(\+)?\s*部')
+
+#: 网页「无结果」文案候选（P1 实测：空结果是 200 页面 + 「没发现A漫.」/
+#: 「找不到和 xxx 相符的內容」，而错误页是独立的 <fieldset><legend> 结构）。
+_HTML_EMPTY_MARKERS = (
+    "沒發現A漫", "没发现A漫",
+    "找不到和", "找不到與", "找不到与",
+    "沒有找到", "没有找到",
+    "暫無結果", "暂无结果",
+    "沒有相關", "没有相关",
+    "無搜尋結果", "无搜索结果",
+    "No results",
+)
+
+#: API 通道 main_tag → jmcomic 客户端方法名（下标 = 协议 main_tag 0..4）。
+_API_SEARCH_METHODS = (
+    "search_site", "search_work", "search_author", "search_tag", "search_actor",
+)
+
+#: 网页通道降级到 API 时给用户看的一句说明。
+_HTML_DEGRADED_HINT = "网页通道不可用，已降级为接口搜索（时间 / 分类筛选不生效）。"
+
+
+class SearchChannelUnavailable(Exception):
+    """强化搜索的某个通道不可用（由服务层收口成 error_payload）。"""
+
+
+def _clamp_page_size(value) -> int:
+    """把 page_size 收敛到 1..SEARCH_PAGE_SIZE；非法值回默认页大小。"""
+    size = _to_int(value, SEARCH_PAGE_SIZE)
+    if size <= 0:
+        return SEARCH_PAGE_SIZE
+    return min(size, SEARCH_PAGE_SIZE)
+
+
+#: 强化搜索参数值域（与 protocol / 服务层保持一致；非法值回落默认值）。
+_ORDER_BY_VALUES = ("mr", "mv", "mp", "tf")
+_TIME_VALUES = ("t", "w", "m", "a")
+_CATEGORY_VALUES = (
+    "0", "doujin", "single", "short", "another",
+    "hanman", "meiman", "doujin_cosplay", "3D", "english_site",
+)
+_SUB_CATEGORY_VALUES = ("chinese", "japanese", "CG", "other", "cosplay", "3d", "youth")
+
+
+def _pick_value(value, allowed: tuple, default: str) -> str:
+    """值域内原样返回，否则回落默认值。"""
+    text = "" if value is None else str(value).strip()
+    return text if text in allowed else default
+
+
+def _html_domains() -> list:
+    """返回当前可用网页域名（动态列表 + 静态候选，去重；60 秒缓存）。
+
+    单个域探测失败后进入冷却，后续翻页优先换域；全部域都在冷却时忽略
+    冷却（否则连续翻页会无谓降级 API）。
+    """
+    now = time.monotonic()
+    with _HTML_DOMAIN_LOCK:
+        expires = float(_HTML_DOMAIN_CACHE.get("expires") or 0.0)
+        cached = list(_HTML_DOMAIN_CACHE.get("domains") or [])
+        if expires <= now or not cached:
+            cached = _collect_html_domains()
+            _HTML_DOMAIN_CACHE["domains"] = list(cached)
+            _HTML_DOMAIN_CACHE["expires"] = now + _HTML_DOMAIN_TTL
+        cooling = {d for d, until in _HTML_DOMAIN_COOLDOWN.items() if until > now}
+    usable = [d for d in cached if d not in cooling]
+    return usable or list(cached)
+
+
+def _collect_html_domains() -> list:
+    """拼域名池：动态列表在前，静态候选兜底，去重并过滤非域名项。"""
+    domains: list = []
+    try:
+        domains.extend(_dynamic_html_domains())
+    except Exception as exc:  # 发布页拿不到时静态候选仍可用
+        diagnostics.record(
+            "HTML_DOMAIN_DISCOVERY_FAILED",
+            "获取禁漫网页域名列表失败，改用静态候选",
+            exc,
+        )
+    domains.extend(_HTML_DOMAIN_CANDIDATES)
+    seen: set = set()
+    result: list = []
+    for item in domains:
+        text = str(item or "").strip().lower()
+        # 发布页列表里可能夹带 "jm365.xyz/ZNPJam" 这类带路径的 APP 下载地址
+        if not text or "/" in text or ":" in text or "." not in text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _dynamic_html_domains(
+    timeout: float = _HTML_DOMAIN_DISCOVERY_TIMEOUT,
+) -> list:
+    """取 jmcomic 发布页动态域名列表（带总等待上限，避免拖过 8 秒）。"""
+    import jmcomic
+
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["domains"] = list(jmcomic.JmModuleConfig.get_html_domain_all())
+        except Exception as exc:  # 异常在调用线程重新抛出
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, name="jml-html-domains", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError("获取禁漫网页域名列表超时")
+    error = box.get("error")
+    if error is not None:
+        raise error
+    return [str(item) for item in (box.get("domains") or [])]
+
+
+def _mark_html_domain_failed(domain: str) -> None:
+    """把探测/解析失败的域记入冷却，避免每页都先撞同一个坏域。"""
+    with _HTML_DOMAIN_LOCK:
+        _HTML_DOMAIN_COOLDOWN[domain] = time.monotonic() + _HTML_DOMAIN_TTL
+
+
+def _reset_html_cache() -> None:
+    """清空域名池缓存与冷却（单元测试与域名排查用）。"""
+    with _HTML_DOMAIN_LOCK:
+        _HTML_DOMAIN_CACHE["domains"] = []
+        _HTML_DOMAIN_CACHE["expires"] = 0.0
+        _HTML_DOMAIN_COOLDOWN.clear()
+
+
+def _build_html_search_url(
+    domain: str,
+    keyword: str,
+    page: int,
+    main_tag: int,
+    order_by: str,
+    time_range: str,
+    category,
+    sub_category,
+) -> str:
+    """拼网页搜索 URL：/search/photos[/分类][/sub/副分类]?参数。"""
+    path = "/search/photos"
+    if category and str(category) != "0":
+        path = f"/search/photos/{category}"
+        if sub_category:
+            path = f"{path}/sub/{sub_category}"
+    query = urllib.parse.urlencode(
+        {
+            "main_tag": int(main_tag),
+            "search_query": keyword,
+            "page": int(page),
+            "o": order_by,
+            "t": time_range,
+        }
+    )
+    return f"https://{domain}{path}?{query}"
+
+
+def _fetch_html(url: str, domain: str, timeout: float = HTML_CHANNEL_TIMEOUT) -> str:
+    """请求网页搜索页；非 200 视为该域失败（403 也走降级）。"""
+    from curl_cffi import requests as creq
+
+    response = creq.get(
+        url,
+        timeout=timeout,
+        impersonate="chrome",
+        allow_redirects=True,
+        headers={
+            "Referer": f"https://{domain}/",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+    )
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status != 200:
+        raise SearchChannelUnavailable(f"网页搜索返回 HTTP {status}")
+    return getattr(response, "text", "") or ""
+
+
+def _html_has_empty_state(html: str) -> bool:
+    """页面是否明确表示「搜索成功但 0 条结果」。
+
+    只认「无结果」文案：关键字过短等错误页也有 ``well well-sm`` 容器，
+    不能拿容器本身当空结果证据，否则错误页会被误判成成功的 0 条。
+    """
+    return any(marker in html for marker in _HTML_EMPTY_MARKERS)
+
+
+def _parse_html_search_page(html: str) -> dict:
+    """解析网页搜索结果，返回 ``{total, total_capped, results}``。
+
+    P1 结论：网页 0 条 ≠ 失败。抓到 total 节点或「无结果」标识 → 成功空结果；
+    两者都没有 → 解析失败，由调用方换域或降级 API。
+    """
+    import jmcomic
+
+    match = _HTML_TOTAL_RE.search(html)
+    total = int(match.group(1)) if match else None
+    capped = bool(match and match.group(2))
+
+    page_obj = None
+    parse_error = None
+    try:
+        page_obj = jmcomic.JmPageTool.parse_html_to_search_page(html)
+    except Exception as exc:
+        parse_error = exc
+    rows = None
+    if page_obj is not None:
+        rows = [
+            _search_row(jmcomic, album_id, info)
+            for album_id, info in page_obj.content
+        ]
+
+    if total is None:
+        if rows:
+            # 有条目但没 total 节点：结构变化，total 用本页条数作下界
+            total = len(rows)
+        elif _html_has_empty_state(html):
+            # 空结果页可能没有 total 节点（只有「没发现A漫」文案）
+            total = 0
+        else:
+            raise SearchChannelUnavailable(
+                "网页搜索页无法解析（既无 total 节点也无无结果标识）"
+            ) from parse_error
+    elif not rows and total > 0:
+        raise SearchChannelUnavailable(
+            "网页搜索页有 total 但条目解析失败"
+        ) from parse_error
+
+    if rows and total <= 0:
+        # 结构异常兜底：有结果却报 0 条时，用本页条数当下界
+        total = len(rows)
+
+    return {
+        "total": int(total),
+        "total_capped": capped,
+        "results": rows or [],
+    }
+
+
+def _decode_html_text(value) -> str:
+    """标题 / 作者里的 HTML 实体解到稳定（站点常见 ``&amp;#160;`` 的双重转义）。"""
+    text = str(value or "")
+    for _ in range(3):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
+def _search_row(jmcomic_module, album_id, info) -> dict:
+    """把 jmcomic 的搜索结果条目映射成与 ``search()`` 完全一致的行结构。"""
+    info = info if isinstance(info, dict) else {}
+    tags = info.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    author = info.get("author") or ""
+    if isinstance(author, (list, tuple)):
+        author = ", ".join(str(item) for item in author)
+    return {
+        "book_id": str(album_id),
+        "title": _decode_html_text(info.get("name")),
+        "author": _decode_html_text(author),
+        # 列表接口若将来带上页数就直接透传（page_count / total_photos），
+        # 现在多数情况没有，恒为 0，由搜索层补全。
+        "page_count": _to_int(info.get("page_count") or info.get("total_photos")),
+        "tags": [_decode_html_text(tag) for tag in tags],
+        "cover_url": _cover_url(jmcomic_module, album_id),
+    }
+
+
+def _api_search_values(jmcomic_module) -> dict:
+    """协议参数值 → jmcomic 常量值（唯一真源：JmMagicConstants）。"""
+    c = jmcomic_module.JmMagicConstants
+    return {
+        "order_by": {
+            "mr": c.ORDER_BY_LATEST,
+            "mv": c.ORDER_BY_VIEW,
+            "mp": c.ORDER_BY_PICTURE,
+            "tf": c.ORDER_BY_LIKE,
+        },
+        "time": {
+            "t": c.TIME_TODAY,
+            "w": c.TIME_WEEK,
+            "m": c.TIME_MONTH,
+            "a": c.TIME_ALL,
+        },
+        "category": {
+            "0": c.CATEGORY_ALL,
+            "doujin": c.CATEGORY_DOUJIN,
+            "single": c.CATEGORY_SINGLE,
+            "short": c.CATEGORY_SHORT,
+            "another": c.CATEGORY_ANOTHER,
+            "hanman": c.CATEGORY_HANMAN,
+            "meiman": c.CATEGORY_MEIMAN,
+            "doujin_cosplay": c.CATEGORY_DOUJIN_COSPLAY,
+            "3D": c.CATEGORY_3D,
+            "english_site": c.CATEGORY_ENGLISH_SITE,
+        },
+        "sub_category": {
+            "chinese": c.SUB_CHINESE,
+            "japanese": c.SUB_JAPANESE,
+            "CG": c.SUB_DOUJIN_CG,
+            "other": c.SUB_ANOTHER_OTHER,
+            "cosplay": c.SUB_ANOTHER_COSPLAY,
+            "3d": c.SUB_ANOTHER_3D,
+            "youth": c.SUB_SINGLE_YOUTH,
+        },
+    }
 
 
 class JmcomicSource:
@@ -415,33 +763,204 @@ class JmcomicSource:
 
         client = self._ensure_client()
         page_obj = client.search_site(search_query=keyword, page=int(page))
-        results: list[dict] = []
-        for album_id, info in page_obj.content:
-            tags = info.get("tags") or []
-            if isinstance(tags, str):
-                tags = [tags]
-            author = info.get("author") or ""
-            if isinstance(author, (list, tuple)):
-                author = ", ".join(str(item) for item in author)
-            results.append(
-                {
-                    "book_id": str(album_id),
-                    "title": str(info.get("name") or ""),
-                    "author": str(author),
-                    # 列表接口若将来带上页数就直接透传（page_count / total_photos），
-                    # 现在两者都没有，恒为 0，由搜索层补全。
-                    "page_count": _to_int(
-                        info.get("page_count") or info.get("total_photos")
-                    ),
-                    "tags": [str(tag) for tag in tags],
-                    "cover_url": _cover_url(jmcomic, album_id),
-                }
-            )
+        results: list[dict] = [
+            _search_row(jmcomic, album_id, info)
+            for album_id, info in page_obj.content
+        ]
         return {
             "keyword": keyword,
             "page": int(page),
             "total_pages": int(page_obj.page_count),
             "results": results,
+        }
+
+    def search_advanced(
+        self,
+        keyword: str,
+        page: int = 1,
+        page_size: int = 80,
+        main_tag: int = 0,
+        order_by: str = "mr",
+        time: str = "a",
+        category: str = "0",
+        sub_category: str | None = None,
+        channel: str = "auto",
+    ) -> dict:
+        """强化搜索：优先网页通道，失败降级 API 通道。
+
+        行结构与 :meth:`search` 完全一致（同一个 ``_search_row``），调用方
+        （服务层 / 插件 / C#）不需要也不允许再做字段清洗。网页通道的
+        ``time`` / ``category`` / ``sub_category`` 真正生效；API 通道只接受
+        ``main_tag`` / ``order_by``，降级时 ``capabilities`` 三项全为 False
+        并用 ``hint`` 告知用户。
+        """
+        page = max(_to_int(page, 1), 1)
+        # jmcomic 网页 / API 都固定 80 条/页：page_size 只做上限收敛，通道页大小不可调
+        page_size = _clamp_page_size(page_size)
+        keyword = str(keyword or "")
+        main_tag = main_tag if main_tag in (0, 1, 2, 3, 4) else 0
+        order_by = _pick_value(order_by, _ORDER_BY_VALUES, "mr")
+        time = _pick_value(time, _TIME_VALUES, "a")
+        category = _pick_value(category, _CATEGORY_VALUES, "0")
+        sub_category = (
+            _pick_value(sub_category, _SUB_CATEGORY_VALUES, "")
+            if sub_category
+            else None
+        ) or None
+        channel = channel if channel in ("auto", "html", "api") else "auto"
+
+        if channel == "api":
+            return self._search_api(
+                keyword, page, main_tag, order_by, time, category, sub_category
+            )
+
+        try:
+            return self._search_html(
+                keyword, page, main_tag, order_by, time, category, sub_category
+            )
+        except SearchChannelUnavailable as exc:
+            diagnostics.record(
+                "SEARCH_HTML_UNAVAILABLE",
+                f"网页搜索通道不可用，降级接口通道: {keyword!r}",
+                exc,
+            )
+
+        payload = self._search_api(
+            keyword, page, main_tag, order_by, time, category, sub_category
+        )
+        payload["hint"] = _HTML_DEGRADED_HINT
+        return payload
+
+    def _search_html(
+        self,
+        keyword: str,
+        page: int,
+        main_tag: int,
+        order_by: str,
+        time_range: str,
+        category: str,
+        sub_category: str | None,
+    ) -> dict:
+        """网页通道：逐个可用域名尝试，全失败抛 :class:`SearchChannelUnavailable`。"""
+        import jmcomic
+
+        values = _api_search_values(jmcomic)
+        category_value = None
+        if category and str(category) != "0":
+            category_value = values["category"].get(str(category), str(category))
+        sub_value = None
+        if sub_category:
+            sub_value = values["sub_category"].get(str(sub_category), str(sub_category))
+            if category_value is None:
+                # /sub/ 只能跟在分类段后面；没有分类时忽略副分类
+                sub_value = None
+
+        failures: list = []
+        for domain in _html_domains():
+            url = _build_html_search_url(
+                domain,
+                keyword,
+                page,
+                main_tag,
+                order_by,
+                time_range,
+                category_value,
+                sub_value,
+            )
+            try:
+                html = _fetch_html(url, domain)
+                parsed = _parse_html_search_page(html)
+            except Exception as exc:
+                _mark_html_domain_failed(domain)
+                failures.append(f"{domain}: {type(exc).__name__}")
+                diagnostics.record(
+                    "SEARCH_HTML_ATTEMPT_FAILED",
+                    f"网页搜索失败: {domain} | {keyword!r} | page={page}",
+                    exc,
+                )
+                continue
+
+            total = int(parsed["total"])
+            return {
+                "channel": "html",
+                "capabilities": {
+                    "time": True,
+                    "category": True,
+                    "sub_category": True,
+                },
+                "total_capped": bool(parsed["total_capped"]),
+                "keyword": keyword,
+                "page": page,
+                "page_size": SEARCH_PAGE_SIZE,
+                "total": total,
+                "total_pages": (
+                    (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE
+                    if total > 0
+                    else 0
+                ),
+                "results": parsed["results"],
+                "hint": "",
+            }
+
+        raise SearchChannelUnavailable(
+            "网页搜索通道全部域名不可用: " + "; ".join(failures or ["无可用域名"])
+        )
+
+    def _search_api(
+        self,
+        keyword: str,
+        page: int,
+        main_tag: int,
+        order_by: str,
+        time_range: str,
+        category: str,
+        sub_category: str | None,
+    ) -> dict:
+        """API 通道：参数按 main_tag 落到 search_site/work/author/tag/actor。
+
+        time / category / sub_category 只支持网页通道（P1 结论），这里固定传
+        jmcomic 的「全部」默认值，保证 API 结果不被这三个筛选影响，也与
+        ``capabilities`` 三项 False 的声明一致。
+        """
+        import jmcomic
+
+        client = self._ensure_client()
+        values = _api_search_values(jmcomic)
+        constants = jmcomic.JmMagicConstants
+        method = getattr(client, _API_SEARCH_METHODS[main_tag])
+        page_obj = method(
+            search_query=keyword,
+            page=int(page),
+            order_by=values["order_by"].get(str(order_by), constants.ORDER_BY_LATEST),
+            time=constants.TIME_ALL,
+            category=constants.CATEGORY_ALL,
+            sub_category=None,
+        )
+        results = [
+            _search_row(jmcomic, album_id, info)
+            for album_id, info in page_obj.content
+        ]
+        total = _to_int(getattr(page_obj, "total", 0))
+        total_pages = _to_int(getattr(page_obj, "page_count", 0))
+        if total <= 0:
+            total = len(results)
+        if total_pages <= 0 and total > 0:
+            total_pages = (total + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE
+        return {
+            "channel": "api",
+            "capabilities": {
+                "time": False,
+                "category": False,
+                "sub_category": False,
+            },
+            "total_capped": False,
+            "keyword": keyword,
+            "page": page,
+            "page_size": SEARCH_PAGE_SIZE,
+            "total": total,
+            "total_pages": total_pages,
+            "results": results,
+            "hint": "",
         }
 
     def get_album(self, book_id: str) -> dict:

@@ -487,7 +487,7 @@ def plugin_page_load(plugin_id: str, page_id: str, params_json: str) -> str:
 
     成功::
 
-        {"ok": true, "template": "list|browser|action|form",
+        {"ok": true, "template": "list|search|browser|action|form",
          "title": "<manifest 页面标题>", "data": {<模板 payload>}}
 
     - ``plugin_id`` 必须是**已加载**插件，``page_id`` 必须在该插件

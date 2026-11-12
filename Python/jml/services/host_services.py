@@ -91,9 +91,59 @@ class _HostService:
 # jm.search
 # ---------------------------------------------------------------------------
 
+#: 强化搜索参数白名单（非法值一律回落默认值，不抛异常）。
+_MAIN_TAGS = (0, 1, 2, 3, 4)
+_ORDER_BYS = ("mr", "mv", "mp", "tf")
+_TIMES = ("t", "w", "m", "a")
+_CATEGORIES = (
+    "0", "doujin", "single", "short", "another",
+    "hanman", "meiman", "doujin_cosplay", "3D", "english_site",
+)
+_SUB_CATEGORIES = ("chinese", "japanese", "CG", "other", "cosplay", "3d", "youth")
+_CHANNELS = ("auto", "html", "api")
+
+
+def _int_or(value, default: int) -> int:
+    """尽量转 int；bool / 非数字 / None 回落默认值。"""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _positive_int(value, default: int = 1) -> int:
+    number = _int_or(value, default)
+    return number if number > 0 else default
+
+
+def _main_tag_of(value) -> int:
+    number = _int_or(value, 0)
+    return number if number in _MAIN_TAGS else 0
+
+
+def _pick(value, allowed: tuple, default: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else default
+
+
+def _category_of(value) -> str:
+    text = "0" if value is None else str(value).strip()
+    return text if text in _CATEGORIES else "0"
+
+
+def _sub_category_of(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text if text in _SUB_CATEGORIES else None
+
 
 class _SearchService(_HostService):
-    METHODS = ("search", "get_page")
+    METHODS = ("search", "get_page", "search_advanced")
 
     # 会话不放在服务里：按调用方 key 从 searcher 取（单一所有者 + 隔离）。
     # 插件经 ctx.call_service 调用时 payload 带 _caller="plugin:<id>"；
@@ -111,6 +161,24 @@ class _SearchService(_HostService):
     def _method_get_page(self, payload: dict) -> dict:
         # 翻页：keyword 可缺省，page>1 时改用本调用方会话的快照关键词
         return self._search(payload)
+
+    def _method_search_advanced(self, payload: dict) -> dict:
+        """强化搜索：白名单收敛参数后交给 ``jm_source.search_advanced``。"""
+        keyword = str(payload.get("keyword") or "").strip()
+        result = jm_source.get_source().search_advanced(
+            keyword,
+            page=_positive_int(payload.get("page"), 1),
+            page_size=_positive_int(payload.get("page_size"), 80),
+            main_tag=_main_tag_of(payload.get("main_tag")),
+            order_by=_pick(payload.get("order_by"), _ORDER_BYS, "mr"),
+            time=_pick(payload.get("time"), _TIMES, "a"),
+            category=_category_of(payload.get("category")),
+            sub_category=_sub_category_of(payload.get("sub_category")),
+            channel=_pick(payload.get("channel"), _CHANNELS, "auto"),
+        )
+        response = dict(result or {})
+        response["ok"] = True
+        return response
 
 
 # ---------------------------------------------------------------------------
