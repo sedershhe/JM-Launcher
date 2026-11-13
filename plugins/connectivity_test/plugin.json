@@ -1,0 +1,14 @@
+{
+  "id": "connectivity_test",
+  "name": "连通性测试",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "测试当前网络可访问哪个禁漫网页域名：复刻 jmcomic 的永久网域 301/302 重定向探测，并对候选网页域并发测活。只读诊断，不改主程序配置。",
+  "entry": "main.py",
+  "dependencies": { "plugins": [] },
+  "services": { "provides": [], "requires": [] },
+  "pages": [
+    { "id": "connectivity_test.main", "title": "连通性测试", "template": "list" }
+  ],
+  "development_sample": false
+}
